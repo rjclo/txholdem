@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Texas Hold'em Table</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <aside id="settings-panel" class="floating-panel settings-panel is-expanded" aria-label="Table settings">
+      <div class="panel-header panel-drag-handle">
+        <p class="panel-title">Settings</p>
+        <button
+          id="settings-toggle"
+          class="panel-toggle"
+          type="button"
+          data-collapsed-label="Cfg"
+          aria-expanded="true"
+          aria-controls="settings-shell"
+          title="Toggle settings"
+        >
+          ≡
+        </button>
+      </div>
+      <div id="settings-shell" class="panel-shell">
+        <form id="player-name-form" class="player-name-form">
+          <label class="panel-label" for="player-name-input">Your Name</label>
+          <div class="player-name-controls">
+            <input id="player-name-input" type="text" maxlength="24" placeholder="Player name" />
+            <button id="player-name-save" type="submit">Save</button>
+          </div>
+        </form>
+        <form id="strategy-form" class="strategy-form">
+          <p class="panel-label">Bot Strategies</p>
+          <label class="strategy-visibility-toggle" for="show-bot-strategies">
+            <input id="show-bot-strategies" type="checkbox" />
+            Show bot strategies on seats
+          </label>
+          <div id="strategy-menu" class="strategy-menu"></div>
+          <button id="strategy-save" type="submit">Save Strategies</button>
+        </form>
+      </div>
+      <div class="panel-resize-handle" aria-hidden="true" title="Drag to resize"></div>
+    </aside>
+
+    <aside id="standings-panel" class="floating-panel standings-panel is-expanded" aria-label="Player standings">
+      <div class="panel-header panel-drag-handle">
+        <p class="panel-title">Standings</p>
+        <button
+          id="standings-toggle"
+          class="panel-toggle"
+          type="button"
+          data-collapsed-label="Stk"
+          aria-expanded="true"
+          aria-controls="standings-shell"
+          title="Toggle standings"
+        >
+          ≡
+        </button>
+      </div>
+      <div id="standings-shell" class="panel-shell">
+        <p class="panel-label">Standings</p>
+        <div id="standings-list" class="standings-list"></div>
+      </div>
+      <div class="panel-resize-handle" aria-hidden="true" title="Drag to resize"></div>
+    </aside>
+
+    <aside id="hint-panel" class="floating-panel hint-panel is-collapsed" aria-label="Hand hint">
+      <div class="panel-header panel-drag-handle">
+        <p class="panel-title">Hint</p>
+        <div class="panel-header-actions">
+          <button id="hint-refresh" class="panel-action-button" type="button" title="Refresh hint">
+            Refresh
+          </button>
+          <button
+            id="hint-toggle"
+            class="panel-toggle"
+            type="button"
+            data-collapsed-label="?"
+            aria-expanded="false"
+            aria-controls="hint-shell"
+            title="Toggle hint"
+          >
+            ?
+          </button>
+        </div>
+      </div>
+      <div id="hint-shell" class="panel-shell">
+        <p id="hint-status" class="hint-status">Click Hint on your seat to calculate odds.</p>
+        <div class="hint-metrics">
+          <div class="hint-metric">
+            <span class="hint-metric-label">Win %</span>
+            <strong id="hint-equity" class="hint-metric-value">-</strong>
+          </div>
+          <div class="hint-metric">
+            <span class="hint-metric-label">Your Hand</span>
+            <strong id="hint-hand-label" class="hint-metric-value">-</strong>
+          </div>
+          <div class="hint-metric">
+            <span class="hint-metric-label">Opponents</span>
+            <strong id="hint-opponents" class="hint-metric-value">-</strong>
+          </div>
+        </div>
+        <section class="hint-section">
+          <p class="panel-label">Made Threats</p>
+          <div id="hint-made-threats" class="hint-list"></div>
+        </section>
+        <section class="hint-section">
+          <p class="panel-label">Draw Threats</p>
+          <div id="hint-draw-threats" class="hint-list"></div>
+        </section>
+      </div>
+      <div class="panel-resize-handle" aria-hidden="true" title="Drag to resize"></div>
+    </aside>
+
+    <main class="app-shell">
+      <section class="table-panel">
+        <header class="table-header">
+          <div>
+            <p class="eyebrow">Texas Hold'em</p>
+            <h1>8-Seat Table</h1>
+          </div>
+          <div class="header-actions">
+            <button id="new-hand-button" type="button">New Hand</button>
+            <button id="reset-game-button" type="button">Reset Game</button>
+            <button id="auto-action-button" type="button">Auto Act Current Seat</button>
+          </div>
+        </header>
+
+        <section class="action-panel">
+          <div class="action-summary">
+            <p class="panel-label">Current Turn</p>
+            <p id="turn-summary" class="turn-summary"></p>
+          </div>
+          <div class="bot-controls">
+            <label class="autoplay-toggle" for="auto-play-bots">
+              <input id="auto-play-bots" type="checkbox" checked />
+              Auto-play bot seats
+            </label>
+            <label class="autoplay-toggle" for="slow-mode-bots">
+              <input id="slow-mode-bots" type="checkbox" />
+              Slow mode
+            </label>
+            <button id="next-bot-action-button" type="button">Next Bot Action</button>
+          </div>
+          <div class="action-controls">
+            <button id="fold-button" type="button">Fold</button>
+            <button id="check-button" type="button">Check</button>
+            <button id="call-button" type="button">Call</button>
+            <button id="all-in-button" type="button">All In</button>
+            <div class="raise-controls">
+              <input id="raise-amount" type="number" min="100" step="50" />
+              <button id="raise-button" type="button">Raise To</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="table" aria-label="Poker table">
+          <div class="table-felt"></div>
+
+          <div class="board">
+            <div class="board-meta">
+              <span id="street-label">Preflop</span>
+              <span id="pot-label">Pot: 0</span>
+            </div>
+            <div id="pot-breakdown" class="pot-breakdown"></div>
+            <div id="community-cards" class="community-cards"></div>
+            <p id="last-action" class="last-action"></p>
+          </div>
+
+          <p id="user-seat-banner" class="user-seat-banner"></p>
+
+          <div id="seats" class="seats"></div>
+        </section>
+      </section>
+    </main>
+
+    <template id="seat-template">
+      <article class="seat">
+        <div class="seat-topline">
+          <h2 class="player-name"></h2>
+          <div class="seat-topline-actions">
+            <span class="player-stack"></span>
+            <button class="hint-seat-button" type="button" title="Show odds hint">Hint</button>
+          </div>
+        </div>
+        <div class="role-markers"></div>
+        <div class="hole-cards"></div>
+        <div class="player-meta">
+          <span class="player-bet"></span>
+          <span class="player-status"></span>
+        </div>
+        <div class="player-strategies"></div>
+      </article>
+    </template>
+
+    <template id="card-template">
+      <div class="card">
+        <span class="card-rank"></span>
+        <span class="card-suit"></span>
+      </div>
+    </template>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

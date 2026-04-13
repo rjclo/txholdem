@@ -1324,6 +1324,15 @@ export function renameUserPlayer(state, name) {
 }
 
 export function startNewHand(previousState) {
+  if (previousState.tournament?.enabled && previousState.tournament?.finished) {
+    return createInitialGame({
+      tournament: previousState.tournament,
+      userName: previousState.players[previousState.userSeat]?.name,
+      enabledStrategyIds: previousState.strategyState?.enabledStrategyIds,
+      uiPreferences: previousState.uiPreferences
+    });
+  }
+
   let state = ensureTournamentClock(previousState);
 
   if (state.tournament?.enabled) {

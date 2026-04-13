@@ -4,3 +4,4 @@ dist/
 
 game-state.json
 logs/
+tmp-appdata/

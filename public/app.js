@@ -534,6 +534,10 @@ function renderTournamentFinish(game) {
   tournamentFinishOverlay.hidden = false;
 }
 
+function dismissTournamentFinishOverlay() {
+  tournamentFinishOverlay.hidden = true;
+}
+
 function buildHintContextKey(game = currentGame) {
   if (!game) {
     return null;
@@ -1389,6 +1393,7 @@ async function fetchHint(force = false) {
 
 newHandButton.addEventListener("click", async () => {
   logUiEvent("ui.click.new-hand");
+  dismissTournamentFinishOverlay();
   try {
     await requestGame("/api/game/new-hand", { method: "POST" });
   } catch (error) {
@@ -1398,6 +1403,7 @@ newHandButton.addEventListener("click", async () => {
 
 resetGameButton.addEventListener("click", async () => {
   logUiEvent("ui.click.reset-game");
+  dismissTournamentFinishOverlay();
   try {
     await requestGame("/api/game/reset", { method: "POST" });
   } catch (error) {

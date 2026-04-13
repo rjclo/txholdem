@@ -3,8 +3,36 @@
   "version": "0.1.0",
   "description": "Texas Hold'em prototype with 8-seat table backend and frontend UI",
   "type": "module",
+  "main": "electron/main.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "desktop": "electron .",
+    "dist:mac": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.rlo.txholdem",
+    "productName": "TX Holdem",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron/**/*",
+      "public/**/*",
+      "src/**/*",
+      "server.js",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.games",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12"
   }
 }

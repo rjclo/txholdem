@@ -1,4 +1,5 @@
 import {
+  assignStrategiesForHand,
   chooseBotAction,
   createStrategyState,
   serializeBotStrategyProfile,
@@ -13,6 +14,32 @@ const RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"];
 const SMALL_BLIND = 50;
 const BIG_BLIND = 100;
 const MAX_PLAYERS = 8;
+const DEFAULT_TOURNAMENT_PAYOUTS = [0.5, 0.3, 0.2];
+const DEFAULT_STARTING_STACK = 10000;
+const DEFAULT_TOURNAMENT_CONFIG = {
+  enabled: false,
+  fieldSize: MAX_PLAYERS,
+  blindLevelDurationSeconds: 300,
+  actionTimeSeconds: 20,
+  timeBankSeconds: 60
+};
+const DEFAULT_UI_PREFERENCES = {
+  showBotStrategies: false
+};
+const TOURNAMENT_BLIND_LEVELS = [
+  { small: 50, big: 100 },
+  { small: 75, big: 150 },
+  { small: 100, big: 200 },
+  { small: 150, big: 300 },
+  { small: 200, big: 400 },
+  { small: 300, big: 600 },
+  { small: 400, big: 800 },
+  { small: 600, big: 1200 },
+  { small: 800, big: 1600 },
+  { small: 1000, big: 2000 },
+  { small: 1500, big: 3000 },
+  { small: 2000, big: 4000 }
+];
 const RANK_VALUE = {
   "2": 2,
   "3": 3,
@@ -55,22 +82,348 @@ function randomSeat() {
   return Math.floor(Math.random() * MAX_PLAYERS);
 }
 
-function createPlayers(userSeat) {
+function sanitizeTournamentConfig(config = {}) {
+  const enabled = Boolean(config.enabled);
+  const fieldSize = enabled
+    ? Math.max(MAX_PLAYERS, Math.min(100, Math.floor(config.fieldSize ?? DEFAULT_TOURNAMENT_CONFIG.fieldSize)))
+    : MAX_PLAYERS;
+
+  return {
+    enabled,
+    fieldSize,
+    blindLevelDurationSeconds: Math.max(30, Math.min(1800, Math.floor(
+      config.blindLevelDurationSeconds ?? DEFAULT_TOURNAMENT_CONFIG.blindLevelDurationSeconds
+    ))),
+    actionTimeSeconds: Math.max(5, Math.min(120, Math.floor(
+      config.actionTimeSeconds ?? DEFAULT_TOURNAMENT_CONFIG.actionTimeSeconds
+    ))),
+    timeBankSeconds: Math.max(0, Math.min(600, Math.floor(
+      config.timeBankSeconds ?? DEFAULT_TOURNAMENT_CONFIG.timeBankSeconds
+    )))
+  };
+}
+
+function sanitizeUiPreferences(preferences = {}) {
+  return {
+    showBotStrategies: Boolean(preferences.showBotStrategies)
+  };
+}
+
+function blindAmountsForState(state) {
+  return state?.tournament?.enabled
+    ? TOURNAMENT_BLIND_LEVELS[
+      Math.min(state.tournament.blindLevelIndex ?? 0, TOURNAMENT_BLIND_LEVELS.length - 1)
+    ]
+    : { small: SMALL_BLIND, big: BIG_BLIND };
+}
+
+function actionTimeMsForState(state) {
+  return (state?.tournament?.actionTimeSeconds ?? DEFAULT_TOURNAMENT_CONFIG.actionTimeSeconds) * 1000;
+}
+
+function defaultTimeBankMs(state) {
+  return state?.tournament?.enabled
+    ? (state.tournament.timeBankSeconds ?? DEFAULT_TOURNAMENT_CONFIG.timeBankSeconds) * 1000
+    : 0;
+}
+
+function createBotIdentity(index) {
+  return {
+    id: `bot-${index}`,
+    name: `Bot ${index}`
+  };
+}
+
+function createPlayers(userSeat, options = {}) {
+  const startingStack = options.startingStack ?? DEFAULT_STARTING_STACK;
+  const userName = options.userName ?? `Player ${userSeat + 1}`;
+  const timeBankRemainingMs = options.timeBankRemainingMs ?? 0;
+
   return Array.from({ length: MAX_PLAYERS }, (_, index) => ({
-    id: `player-${index + 1}`,
-    name: `Player ${index + 1}`,
+    ...(index === userSeat ? { id: `player-${index + 1}`, name: userName } : createBotIdentity(index + 1)),
     seat: index,
-    stack: 10000,
+    stack: startingStack,
     hand: [],
     folded: false,
     bet: 0,
     totalCommitted: 0,
-    sessionStartingStack: 10000,
-    startingStack: 10000,
+    sessionStartingStack: startingStack,
+    startingStack,
     streetAction: null,
     lastVisibleAction: null,
+    timeBankRemainingMs,
     isBot: index !== userSeat
   }));
+}
+
+function createExternalPlayers(count, startIndex, startingStack) {
+  return Array.from({ length: count }, (_, offset) => {
+    const identity = createBotIdentity(startIndex + offset);
+    return {
+      ...identity,
+      stack: startingStack
+    };
+  });
+}
+
+function buildTournamentState(config, players) {
+  const normalized = sanitizeTournamentConfig(config);
+  const startingStack = players[0]?.startingStack ?? DEFAULT_STARTING_STACK;
+  const botsAtTable = players.filter((player) => player.isBot).length;
+  const offTableCount = Math.max(0, normalized.fieldSize - botsAtTable - 1);
+
+  return {
+    ...normalized,
+    startedAt: Date.now(),
+    blindLevelIndex: 0,
+    blindLevelStartedAt: Date.now(),
+    offTableBots: createExternalPlayers(offTableCount, MAX_PLAYERS + 1, startingStack),
+    nextBotIndex: MAX_PLAYERS + 1 + offTableCount,
+    eliminationOrder: [],
+    finished: false,
+    champion: null,
+    podium: []
+  };
+}
+
+function tournamentFieldEntries(state) {
+  if (!state?.tournament?.enabled) {
+    return [];
+  }
+
+  return [
+    ...state.players.map((player) => ({
+      id: player.id,
+      name: player.name,
+      stack: player.stack,
+      isUser: player.seat === state.userSeat
+    })),
+    ...state.tournament.offTableBots.map((player) => ({
+      id: player.id,
+      name: player.name,
+      stack: player.stack,
+      isUser: false
+    }))
+  ];
+}
+
+function finalizeTournamentState(previousState, nextState) {
+  if (!previousState?.tournament?.enabled || !nextState?.tournament?.enabled) {
+    return nextState;
+  }
+
+  const previousField = tournamentFieldEntries(previousState);
+  const nextField = tournamentFieldEntries(nextState);
+  const previousActiveIds = new Set(previousField.filter((player) => player.stack > 0).map((player) => player.id));
+  const nextActiveIds = new Set(nextField.filter((player) => player.stack > 0).map((player) => player.id));
+  const existingEliminations = Array.isArray(nextState.tournament.eliminationOrder)
+    ? [...nextState.tournament.eliminationOrder]
+    : [];
+  const seenEliminationIds = new Set(existingEliminations.map((entry) => entry.id));
+  const newlyEliminated = previousField
+    .filter((player) => previousActiveIds.has(player.id) && !nextActiveIds.has(player.id))
+    .sort((left, right) => left.stack - right.stack || left.name.localeCompare(right.name));
+
+  for (const player of newlyEliminated) {
+    if (seenEliminationIds.has(player.id)) {
+      continue;
+    }
+
+    existingEliminations.push({
+      id: player.id,
+      name: player.name,
+      isUser: player.isUser
+    });
+    seenEliminationIds.add(player.id);
+  }
+
+  const survivingPlayers = nextField.filter((player) => player.stack > 0);
+  const isFinished = survivingPlayers.length === 1;
+  const champion = isFinished
+    ? {
+        id: survivingPlayers[0].id,
+        name: survivingPlayers[0].name,
+        isUser: survivingPlayers[0].isUser
+      }
+    : null;
+  const finalPlacings = isFinished
+    ? [champion, ...existingEliminations.slice().reverse()]
+        .filter(Boolean)
+        .slice(0, 3)
+        .map((entry, index) => ({
+          place: index + 1,
+          id: entry.id,
+          name: entry.name,
+          isUser: entry.isUser
+        }))
+    : [];
+
+  return {
+    ...nextState,
+    tournament: {
+      ...nextState.tournament,
+      eliminationOrder: existingEliminations,
+      finished: isFinished,
+      champion,
+      podium: finalPlacings
+    }
+  };
+}
+
+function activeFieldCount(state) {
+  if (!state?.tournament?.enabled) {
+    return playersWithChips(state.players).length;
+  }
+
+  return playersWithChips(state.players).length +
+    state.tournament.offTableBots.filter((player) => player.stack > 0).length;
+}
+
+function ensureTournamentClock(state, now = Date.now()) {
+  if (!state?.tournament?.enabled) {
+    return state;
+  }
+
+  const levelDurationMs = state.tournament.blindLevelDurationSeconds * 1000;
+  const elapsed = Math.max(0, now - state.tournament.blindLevelStartedAt);
+  const levelJump = Math.floor(elapsed / levelDurationMs);
+
+  if (levelJump <= 0) {
+    return state;
+  }
+
+  return {
+    ...state,
+    tournament: {
+      ...state.tournament,
+      blindLevelIndex: Math.min(
+        state.tournament.blindLevelIndex + levelJump,
+        TOURNAMENT_BLIND_LEVELS.length - 1
+      ),
+      blindLevelStartedAt: state.tournament.blindLevelStartedAt + levelJump * levelDurationMs
+    }
+  };
+}
+
+function consumeTurnTime(player, state, now = Date.now()) {
+  if (!state?.tournament?.enabled || state.actionSeat === null || !player) {
+    return player;
+  }
+
+  const actionTimeMs = actionTimeMsForState(state);
+  const startedAt = state.currentTurnStartedAt ?? now;
+  const elapsed = Math.max(0, now - startedAt);
+  const overflow = Math.max(0, elapsed - actionTimeMs);
+
+  if (overflow <= 0) {
+    return player;
+  }
+
+  return {
+    ...player,
+    timeBankRemainingMs: Math.max(0, (player.timeBankRemainingMs ?? defaultTimeBankMs(state)) - overflow)
+  };
+}
+
+function withNextTurn(state, actionSeat) {
+  return {
+    ...state,
+    actionSeat,
+    currentTurnStartedAt: actionSeat === null ? null : Date.now()
+  };
+}
+
+function simulateExternalField(state) {
+  if (!state?.tournament?.enabled || state.tournament.offTableBots.length === 0) {
+    return state;
+  }
+
+  const offTableBots = state.tournament.offTableBots.map((player) => ({ ...player }));
+  const activeBots = offTableBots.filter((player) => player.stack > 0);
+
+  if (activeBots.length < 2) {
+    return state;
+  }
+
+  const shuffled = shuffle(activeBots);
+  const { big } = blindAmountsForState(state);
+
+  for (let index = 0; index < shuffled.length; index += MAX_PLAYERS) {
+    const table = shuffled.slice(index, index + MAX_PLAYERS);
+
+    if (table.length < 2) {
+      continue;
+    }
+
+    const winner = table[Math.floor(Math.random() * table.length)];
+    let pot = 0;
+
+    for (const player of table) {
+      const pressure = 0.9 + Math.random() * 2.1;
+      const contribution = Math.min(player.stack, Math.max(0, Math.round(big * pressure)));
+      player.stack -= contribution;
+      pot += contribution;
+    }
+
+    winner.stack += pot;
+  }
+
+  return finalizeTournamentState(state, {
+    ...state,
+    tournament: {
+      ...state.tournament,
+      offTableBots
+    }
+  });
+}
+
+function refillTableFromField(state) {
+  if (!state?.tournament?.enabled) {
+    return state;
+  }
+
+  const offTableBots = [...state.tournament.offTableBots];
+  const players = state.players.map((player) => ({ ...player }));
+
+  for (let seat = 0; seat < players.length; seat += 1) {
+    const player = players[seat];
+
+    if (!player.isBot || player.stack > 0) {
+      continue;
+    }
+
+    const nextIndex = offTableBots.findIndex((bot) => bot.stack > 0);
+    if (nextIndex === -1) {
+      break;
+    }
+
+    const incoming = offTableBots.splice(nextIndex, 1)[0];
+    players[seat] = {
+      ...player,
+      id: incoming.id,
+      name: incoming.name,
+      stack: incoming.stack,
+      startingStack: incoming.stack,
+      sessionStartingStack: player.sessionStartingStack,
+      hand: [],
+      folded: false,
+      bet: 0,
+      totalCommitted: 0,
+      streetAction: null,
+      lastVisibleAction: null,
+      timeBankRemainingMs: defaultTimeBankMs(state),
+      isBot: true
+    };
+  }
+
+  return finalizeTournamentState(state, {
+    ...state,
+    players,
+    tournament: {
+      ...state.tournament,
+      offTableBots
+    }
+  });
 }
 
 function nextSeat(currentSeat) {
@@ -648,17 +1001,18 @@ function describePostflop(player, communityCards) {
 
 function buildDecisionContext(state, seat) {
   const player = state.players[seat];
+  const blinds = blindAmountsForState(state);
   return {
     seat,
     street: state.street,
     legalActions: getLegalActions(state, seat),
     toCall: getToCall(state, seat),
     currentBet: state.currentBet,
-    minRaiseTo: state.currentBet === 0 ? BIG_BLIND : state.currentBet + state.minRaise,
+    minRaiseTo: state.currentBet === 0 ? blinds.big : state.currentBet + state.minRaise,
     maxRaiseTo: player.bet + player.stack,
     pot: state.pot,
-    smallBlind: SMALL_BLIND,
-    bigBlind: BIG_BLIND,
+    smallBlind: blinds.small,
+    bigBlind: blinds.big,
     playerStack: player.stack,
     playerBet: player.bet,
     playersRemaining: playersStillInHand(state.players).length,
@@ -715,6 +1069,7 @@ function getToCall(state, seat) {
 
 function getLegalActions(state, seat = state.actionSeat) {
   const player = getPlayer(state, seat);
+  const blinds = blindAmountsForState(state);
 
   if (!player || state.street === "showdown" || player.folded || player.stack === 0) {
     return [];
@@ -729,7 +1084,7 @@ function getLegalActions(state, seat = state.actionSeat) {
     legalActions.push("call");
   }
 
-  const minRaiseTo = state.currentBet === 0 ? BIG_BLIND : state.currentBet + state.minRaise;
+  const minRaiseTo = state.currentBet === 0 ? blinds.big : state.currentBet + state.minRaise;
   const maxRaiseTo = player.bet + player.stack;
 
   if (maxRaiseTo >= minRaiseTo) {
@@ -757,7 +1112,7 @@ function awardPotToLastPlayer(state) {
   const winner = remainingPlayers[0];
   winner.stack += state.pot;
 
-  return {
+  return finalizeTournamentState(state, {
     ...state,
     pot: 0,
     street: "showdown",
@@ -768,7 +1123,7 @@ function awardPotToLastPlayer(state) {
     winningHandLabel: "Uncontested",
     winningCommunityCardIndices: [],
     lastAction: `${winner.name} wins ${state.pot} chips uncontested`
-  };
+  });
 }
 
 function awardPotAtShowdown(state) {
@@ -854,7 +1209,7 @@ function awardPotAtShowdown(state) {
         .map((index) => index - 2)
     : [];
 
-  return {
+  return finalizeTournamentState(state, {
     ...state,
     pot: 0,
     street: "showdown",
@@ -865,7 +1220,7 @@ function awardPotAtShowdown(state) {
     winningHandLabel,
     winningCommunityCardIndices: highlightedBoardIndices,
     lastAction: `${winnerLabel} ${plural} ${summaryAmount} chips with ${winningHandLabel}`
-  };
+  });
 }
 
 function revealShowdown(state) {
@@ -894,6 +1249,7 @@ function resolveAutomaticRunout(state) {
 }
 
 function startBettingRound(state, street) {
+  const blinds = blindAmountsForState(state);
   const players = state.players.map((player) => ({
     ...player,
     bet: 0,
@@ -908,25 +1264,39 @@ function startBettingRound(state, street) {
     street,
     players,
     currentBet: 0,
-    minRaise: BIG_BLIND,
+    minRaise: blinds.big,
     actionSeat: pendingSeats[0] ?? null,
+    currentTurnStartedAt: pendingSeats[0] === undefined ? null : Date.now(),
     pendingSeats,
     lastAction: `${street[0].toUpperCase()}${street.slice(1)} dealt`
   });
 }
 
-export function createInitialGame() {
+export function createInitialGame(options = {}) {
+  const tournament = sanitizeTournamentConfig(options.tournament);
+  const uiPreferences = sanitizeUiPreferences(options.uiPreferences);
   const userSeat = randomSeat();
-  const players = createPlayers(userSeat);
+  const players = createPlayers(userSeat, {
+    userName: options.userName,
+    timeBankRemainingMs: tournament.enabled ? tournament.timeBankSeconds * 1000 : 0
+  });
   const dealerSeat = randomSeat();
-  const strategyState = createStrategyState(players, userSeat);
-  return startNewHand({
+  const strategyState = assignStrategiesForHand(
+    createStrategyState(players, userSeat, options.enabledStrategyIds),
+    1
+  );
+  const baseState = {
     handNumber: 0,
     players,
     dealerSeat,
     userSeat,
-    strategyState
-  });
+    strategyState,
+    tournament: tournament.enabled ? buildTournamentState(tournament, players) : tournament,
+    uiPreferences,
+    currentTurnStartedAt: null
+  };
+
+  return startNewHand(baseState);
 }
 
 export function renameUserPlayer(state, name) {
@@ -954,32 +1324,56 @@ export function renameUserPlayer(state, name) {
 }
 
 export function startNewHand(previousState) {
-  if (playersWithChips(previousState.players).length < 2) {
-    return createInitialGame();
+  let state = ensureTournamentClock(previousState);
+
+  if (state.tournament?.enabled) {
+    if (state.handNumber > 0) {
+      state = simulateExternalField(state);
+    }
+
+    state = refillTableFromField(state);
+
+    if (state.players[state.userSeat].stack <= 0) {
+      return finalizeTournamentState(previousState, {
+        ...state,
+        street: "showdown",
+        actionSeat: null,
+        pendingSeats: [],
+        currentTurnStartedAt: null,
+        lastAction: `${state.players[state.userSeat].name} has been eliminated from the tournament.`
+      });
+    }
   }
 
-  const handNumber = previousState.handNumber + 1;
-  const dealerSeat = nextSeatWithChips(previousState.players, previousState.dealerSeat);
-  const smallBlindSeat = nextSeatWithChips(previousState.players, dealerSeat);
-  const bigBlindSeat = nextSeatWithChips(previousState.players, smallBlindSeat);
+  if (playersWithChips(state.players).length < 2) {
+    return state.tournament?.enabled
+      ? finalizeTournamentState(previousState, state)
+      : createInitialGame();
+  }
+
+  const handNumber = state.handNumber + 1;
+  const dealerSeat = nextSeatWithChips(state.players, state.dealerSeat);
+  const smallBlindSeat = nextSeatWithChips(state.players, dealerSeat);
+  const bigBlindSeat = nextSeatWithChips(state.players, smallBlindSeat);
   const deck = shuffle(createDeck());
-  const players = resetPlayersForHand(previousState.players);
+  const players = resetPlayersForHand(state.players);
+  const blinds = blindAmountsForState(state);
 
   dealHoleCards(players, deck);
   const actionSeat = firstSeatToActForStreet(players, "preflop", dealerSeat, bigBlindSeat);
 
-  const smallBlind = postBlind(players[smallBlindSeat], SMALL_BLIND);
-  const bigBlind = postBlind(players[bigBlindSeat], BIG_BLIND);
+  const smallBlind = postBlind(players[smallBlindSeat], blinds.small);
+  const bigBlind = postBlind(players[bigBlindSeat], blinds.big);
   players[smallBlindSeat].streetAction = `small-blind ${smallBlind}`;
   players[smallBlindSeat].lastVisibleAction = `small-blind ${smallBlind}`;
   players[bigBlindSeat].streetAction = `big-blind ${bigBlind}`;
   players[bigBlindSeat].lastVisibleAction = `big-blind ${bigBlind}`;
   const pendingSeats = buildPendingSeatsForRound(players, actionSeat);
 
-  return {
+  return finalizeTournamentState(previousState, {
     handNumber,
-    userSeat: previousState.userSeat,
-    strategyState: previousState.strategyState,
+    userSeat: state.userSeat,
+    strategyState: assignStrategiesForHand(state.strategyState, handNumber),
     street: "preflop",
     pot: smallBlind + bigBlind,
     communityCards: [],
@@ -988,16 +1382,18 @@ export function startNewHand(previousState) {
     smallBlindSeat,
     bigBlindSeat,
     actionSeat,
+    currentTurnStartedAt: actionSeat === null ? null : Date.now(),
     pendingSeats,
-    currentBet: BIG_BLIND,
-    minRaise: BIG_BLIND,
+    currentBet: blinds.big,
+    minRaise: blinds.big,
     players,
+    tournament: state.tournament,
     winnerSeat: null,
     winnerSeats: [],
     winningHandLabel: null,
     winningCommunityCardIndices: [],
     lastAction: `Hand ${handNumber} started`
-  };
+  });
 }
 
 export function advanceStreet(state) {
@@ -1049,20 +1445,22 @@ function progressAfterAction(state, seat, summary) {
     });
   }
 
-  return {
+  return withNextTurn({
     ...state,
-    actionSeat: state.pendingSeats[0],
     lastAction: summary
-  };
+  }, state.pendingSeats[0]);
 }
 
 export function applyAction(state, action, amount = null) {
+  state = ensureTournamentClock(state);
+
   if (state.street === "showdown") {
     return startNewHand(state);
   }
 
   const seat = state.actionSeat;
   const legalActions = getLegalActions(state, seat);
+  const blinds = blindAmountsForState(state);
 
   if (!legalActions.includes(action)) {
     throw new Error(`Illegal action: ${action}`);
@@ -1074,58 +1472,60 @@ export function applyAction(state, action, amount = null) {
     pendingSeats: [...state.pendingSeats]
   };
   const player = nextState.players[seat];
+  nextState.players[seat] = consumeTurnTime(player, state);
+  const timedPlayer = nextState.players[seat];
   const toCall = getToCall(nextState, seat);
   nextState.pendingSeats = nextState.pendingSeats.filter((pendingSeat) => pendingSeat !== seat);
 
   if (action === "fold") {
-    player.folded = true;
-    player.streetAction = "fold";
-    player.lastVisibleAction = "fold";
+    timedPlayer.folded = true;
+    timedPlayer.streetAction = "fold";
+    timedPlayer.lastVisibleAction = "fold";
     return progressAfterAction(nextState, seat, `${player.name} folds`);
   }
 
   if (action === "check") {
-    player.streetAction = "check";
-    player.lastVisibleAction = "check";
+    timedPlayer.streetAction = "check";
+    timedPlayer.lastVisibleAction = "check";
     return progressAfterAction(nextState, seat, `${player.name} checks`);
   }
 
   if (action === "call") {
-    const callAmount = Math.min(player.stack, toCall);
-    player.stack -= callAmount;
-    player.bet += callAmount;
-    player.totalCommitted += callAmount;
+    const callAmount = Math.min(timedPlayer.stack, toCall);
+    timedPlayer.stack -= callAmount;
+    timedPlayer.bet += callAmount;
+    timedPlayer.totalCommitted += callAmount;
     nextState.pot += callAmount;
-    player.streetAction = `call ${player.bet}`;
-    player.lastVisibleAction = `call ${player.bet}`;
+    timedPlayer.streetAction = `call ${timedPlayer.bet}`;
+    timedPlayer.lastVisibleAction = `call ${timedPlayer.bet}`;
     return progressAfterAction(nextState, seat, `${player.name} calls ${callAmount}`);
   }
 
   if (action === "all-in") {
-    const shoveTo = player.bet + player.stack;
-    const minRaiseTo = nextState.currentBet === 0 ? BIG_BLIND : nextState.currentBet + nextState.minRaise;
+    const shoveTo = timedPlayer.bet + timedPlayer.stack;
+    const minRaiseTo = nextState.currentBet === 0 ? blinds.big : nextState.currentBet + nextState.minRaise;
 
     if (shoveTo <= nextState.currentBet) {
-      const callAmount = Math.min(player.stack, toCall);
-      player.stack -= callAmount;
-      player.bet += callAmount;
-      player.totalCommitted += callAmount;
+      const callAmount = Math.min(timedPlayer.stack, toCall);
+      timedPlayer.stack -= callAmount;
+      timedPlayer.bet += callAmount;
+      timedPlayer.totalCommitted += callAmount;
       nextState.pot += callAmount;
-      player.streetAction = `all-in ${player.bet}`;
-      player.lastVisibleAction = `all-in ${player.bet}`;
-      return progressAfterAction(nextState, seat, `${player.name} is all-in for ${player.bet}`);
+      timedPlayer.streetAction = `all-in ${timedPlayer.bet}`;
+      timedPlayer.lastVisibleAction = `all-in ${timedPlayer.bet}`;
+      return progressAfterAction(nextState, seat, `${player.name} is all-in for ${timedPlayer.bet}`);
     }
 
-    const putInChips = shoveTo - player.bet;
-    player.stack = 0;
-    player.bet = shoveTo;
-    player.totalCommitted += putInChips;
+    const putInChips = shoveTo - timedPlayer.bet;
+    timedPlayer.stack = 0;
+    timedPlayer.bet = shoveTo;
+    timedPlayer.totalCommitted += putInChips;
     nextState.pot += putInChips;
-    player.streetAction = `all-in ${shoveTo}`;
-    player.lastVisibleAction = `all-in ${shoveTo}`;
+    timedPlayer.streetAction = `all-in ${shoveTo}`;
+    timedPlayer.lastVisibleAction = `all-in ${shoveTo}`;
 
     if (shoveTo >= minRaiseTo) {
-      nextState.minRaise = Math.max(BIG_BLIND, shoveTo - nextState.currentBet);
+      nextState.minRaise = Math.max(blinds.big, shoveTo - nextState.currentBet);
       nextState.currentBet = shoveTo;
       nextState.pendingSeats = collectPendingAfterAggression(nextState.players, seat);
     }
@@ -1133,22 +1533,22 @@ export function applyAction(state, action, amount = null) {
     return progressAfterAction(nextState, seat, `${player.name} moves all-in for ${shoveTo}`);
   }
 
-  const minRaiseTo = nextState.currentBet === 0 ? BIG_BLIND : nextState.currentBet + nextState.minRaise;
-  const maxRaiseTo = player.bet + player.stack;
+  const minRaiseTo = nextState.currentBet === 0 ? blinds.big : nextState.currentBet + nextState.minRaise;
+  const maxRaiseTo = timedPlayer.bet + timedPlayer.stack;
   const raiseTo = Number(amount);
 
   if (!Number.isFinite(raiseTo) || raiseTo < minRaiseTo || raiseTo > maxRaiseTo) {
     throw new Error(`Raise must be between ${minRaiseTo} and ${maxRaiseTo}`);
   }
 
-  const putInChips = raiseTo - player.bet;
-  player.stack -= putInChips;
-  player.bet = raiseTo;
-  player.totalCommitted += putInChips;
+  const putInChips = raiseTo - timedPlayer.bet;
+  timedPlayer.stack -= putInChips;
+  timedPlayer.bet = raiseTo;
+  timedPlayer.totalCommitted += putInChips;
   nextState.pot += putInChips;
-  player.streetAction = `raise ${raiseTo}`;
-  player.lastVisibleAction = `raise ${raiseTo}`;
-  nextState.minRaise = Math.max(BIG_BLIND, raiseTo - nextState.currentBet);
+  timedPlayer.streetAction = `raise ${raiseTo}`;
+  timedPlayer.lastVisibleAction = `raise ${raiseTo}`;
+  nextState.minRaise = Math.max(blinds.big, raiseTo - nextState.currentBet);
   nextState.currentBet = raiseTo;
   nextState.pendingSeats = collectPendingAfterAggression(nextState.players, seat);
 
@@ -1196,6 +1596,26 @@ export function updateEnabledStrategies(state, enabledStrategyIds) {
   };
 }
 
+export function updateTournamentConfig(state, tournamentConfig) {
+  const normalized = sanitizeTournamentConfig(tournamentConfig);
+  return createInitialGame({
+    tournament: normalized,
+    userName: state.players[state.userSeat]?.name,
+    enabledStrategyIds: state.strategyState?.enabledStrategyIds,
+    uiPreferences: state.uiPreferences
+  });
+}
+
+export function updateUiPreferences(state, uiPreferences) {
+  return {
+    ...state,
+    uiPreferences: sanitizeUiPreferences({
+      ...state.uiPreferences,
+      ...uiPreferences
+    })
+  };
+}
+
 export function hydrateGameState(rawState) {
   if (!rawState || !Array.isArray(rawState.players) || rawState.players.length !== MAX_PLAYERS) {
     return createInitialGame();
@@ -1216,7 +1636,16 @@ export function hydrateGameState(rawState) {
     startingStack: rawState.players[index]?.startingStack ?? rawState.players[index]?.stack ?? basePlayer.startingStack
   }));
   const enabledStrategyIds = rawState.strategyState?.enabledStrategyIds;
-  const baseStrategyState = createStrategyState(players, userSeat, enabledStrategyIds);
+  const initialStrategyState = createStrategyState(players, userSeat, enabledStrategyIds);
+  const baseStrategyState = assignStrategiesForHand({
+    ...initialStrategyState,
+    botProfiles: rawState.strategyState?.botProfiles ?? initialStrategyState.botProfiles
+  }, rawState.handNumber ?? 1);
+  const storedCurrentStrategyBySeat = rawState.strategyState?.currentStrategyBySeat;
+  const hasStructuredCurrentStrategies = storedCurrentStrategyBySeat &&
+    Object.values(storedCurrentStrategyBySeat).every((entry) => typeof entry === "object" && entry !== null && "basic" in entry);
+  const tournament = sanitizeTournamentConfig(rawState.tournament);
+  const uiPreferences = sanitizeUiPreferences(rawState.uiPreferences);
 
   return {
     ...rawState,
@@ -1224,20 +1653,49 @@ export function hydrateGameState(rawState) {
     players,
     strategyState: {
       enabledStrategyIds: baseStrategyState.enabledStrategyIds,
-      botProfiles: rawState.strategyState?.botProfiles ?? baseStrategyState.botProfiles
+      botProfiles: rawState.strategyState?.botProfiles ?? baseStrategyState.botProfiles,
+      botHandPlans: rawState.strategyState?.botHandPlans ?? baseStrategyState.botHandPlans,
+      botModifierProfiles: rawState.strategyState?.botModifierProfiles ?? baseStrategyState.botModifierProfiles,
+      currentStrategyBySeat: hasStructuredCurrentStrategies
+        ? rawState.strategyState.currentStrategyBySeat
+        : baseStrategyState.currentStrategyBySeat
     },
+    tournament: tournament.enabled
+      ? {
+          ...buildTournamentState(tournament, players),
+          ...rawState.tournament,
+          enabled: true,
+          fieldSize: tournament.fieldSize,
+          blindLevelDurationSeconds: tournament.blindLevelDurationSeconds,
+          actionTimeSeconds: tournament.actionTimeSeconds,
+          timeBankSeconds: tournament.timeBankSeconds,
+          offTableBots: Array.isArray(rawState.tournament?.offTableBots) ? rawState.tournament.offTableBots : [],
+          eliminationOrder: Array.isArray(rawState.tournament?.eliminationOrder)
+            ? rawState.tournament.eliminationOrder
+            : [],
+          finished: Boolean(rawState.tournament?.finished),
+          champion: rawState.tournament?.champion ?? null,
+          podium: Array.isArray(rawState.tournament?.podium) ? rawState.tournament.podium : []
+        }
+      : tournament,
+    uiPreferences,
     winnerSeats: Array.isArray(rawState.winnerSeats) ? rawState.winnerSeats : [],
     winningHandLabel: rawState.winningHandLabel ?? null
     ,
     winningCommunityCardIndices: Array.isArray(rawState.winningCommunityCardIndices)
       ? rawState.winningCommunityCardIndices
-      : []
+      : [],
+    currentTurnStartedAt: rawState.currentTurnStartedAt ?? null
   };
 }
 
 function restartAbandonedHand(state) {
+  state = ensureTournamentClock(state);
+  if (state.tournament?.enabled) {
+    state = refillTableFromField(state);
+  }
   if (playersWithChips(state.players).length < 2) {
-    return createInitialGame();
+    return state.tournament?.enabled ? state : createInitialGame();
   }
 
   const players = state.players.map((player) => ({
@@ -1251,14 +1709,15 @@ function restartAbandonedHand(state) {
     lastVisibleAction: null
   }));
   const deck = shuffle(createDeck());
+  const blinds = blindAmountsForState(state);
 
   dealHoleCards(players, deck);
 
   const dealerSeat = nextSeatWithChips(players, state.dealerSeat - 1 < 0 ? MAX_PLAYERS - 1 : state.dealerSeat - 1);
   const smallBlindSeat = nextSeatWithChips(players, dealerSeat);
   const bigBlindSeat = nextSeatWithChips(players, smallBlindSeat);
-  const smallBlind = postBlind(players[smallBlindSeat], SMALL_BLIND);
-  const bigBlind = postBlind(players[bigBlindSeat], BIG_BLIND);
+  const smallBlind = postBlind(players[smallBlindSeat], blinds.small);
+  const bigBlind = postBlind(players[bigBlindSeat], blinds.big);
   players[smallBlindSeat].streetAction = `small-blind ${smallBlind}`;
   players[smallBlindSeat].lastVisibleAction = `small-blind ${smallBlind}`;
   players[bigBlindSeat].streetAction = `big-blind ${bigBlind}`;
@@ -1276,9 +1735,10 @@ function restartAbandonedHand(state) {
     smallBlindSeat,
     bigBlindSeat,
     actionSeat,
+    currentTurnStartedAt: actionSeat === null ? null : Date.now(),
     pendingSeats,
-    currentBet: BIG_BLIND,
-    minRaise: BIG_BLIND,
+    currentBet: blinds.big,
+    minRaise: blinds.big,
     players,
     winnerSeat: null,
     winnerSeats: [],
@@ -1442,12 +1902,233 @@ function estimateUserEquity(state, iterations = 2500) {
   return (equity / iterations) * 100;
 }
 
+function activePlayersByStack(state) {
+  const fieldPlayers = [
+    ...state.players.map((player) => ({ seat: player.seat, stack: player.stack, isUser: player.seat === state.userSeat })),
+    ...(state.tournament?.enabled
+      ? state.tournament.offTableBots.map((player) => ({ id: player.id, stack: player.stack, isUser: false }))
+      : [])
+  ];
+
+  return fieldPlayers
+    .filter((player) => player.stack > 0)
+    .sort((left, right) => right.stack - left.stack || (left.seat ?? 999) - (right.seat ?? 999));
+}
+
+function tournamentPayoutsFor(state) {
+  const activePlayers = activeFieldCount(state);
+
+  if (activePlayers <= 1) {
+    return [1];
+  }
+
+  if (activePlayers === 2) {
+    return [0.65, 0.35];
+  }
+
+  if (activePlayers === 3) {
+    return [0.5, 0.3, 0.2];
+  }
+
+  return DEFAULT_TOURNAMENT_PAYOUTS;
+}
+
+function computeIcmFinishProbabilities(stacks, paidSpots, memo = new Map()) {
+  const normalized = stacks.map((stack) => Math.max(0, stack));
+  const key = `${normalized.join(",")}|${paidSpots}`;
+
+  if (memo.has(key)) {
+    return memo.get(key);
+  }
+
+  const result = normalized.map(() => Array.from({ length: paidSpots }, () => 0));
+  const playersRemaining = normalized.filter((stack) => stack > 0).length;
+
+  if (paidSpots === 0 || playersRemaining === 0) {
+    memo.set(key, result);
+    return result;
+  }
+
+  const totalChips = normalized.reduce((sum, stack) => sum + stack, 0);
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const stack = normalized[index];
+
+    if (stack <= 0) {
+      continue;
+    }
+
+    const finishFirstProbability = stack / totalChips;
+    result[index][0] += finishFirstProbability;
+
+    if (paidSpots > 1) {
+      const nextStacks = normalized.map((value, seat) => (seat === index ? 0 : value));
+      const subResults = computeIcmFinishProbabilities(nextStacks, paidSpots - 1, memo);
+
+      for (let seat = 0; seat < subResults.length; seat += 1) {
+        for (let spot = 0; spot < paidSpots - 1; spot += 1) {
+          result[seat][spot + 1] += finishFirstProbability * subResults[seat][spot];
+        }
+      }
+    }
+  }
+
+  memo.set(key, result);
+  return result;
+}
+
+function summarizeIcm(state) {
+  const payouts = tournamentPayoutsFor(state);
+  const fieldStacks = [
+    ...state.players.map((player) => player.stack),
+    ...(state.tournament?.enabled ? state.tournament.offTableBots.map((player) => player.stack) : [])
+  ];
+  const userStack = state.players[state.userSeat].stack;
+  const totalChips = Math.max(1, fieldStacks.reduce((sum, stack) => sum + stack, 0));
+  const chipShare = userStack / totalChips;
+  const userProbabilities = fieldStacks.length <= 10
+    ? (computeIcmFinishProbabilities(fieldStacks, payouts.length)[state.userSeat] ?? [])
+    : payouts.map((_, index) => Math.min(1, chipShare * (index === 0 ? 1 : 0.6 / (index + 1))));
+  const payoutEquity = userProbabilities.reduce(
+    (sum, probability, index) => sum + probability * (payouts[index] ?? 0),
+    0
+  );
+  const activePlayers = activePlayersByStack(state);
+  const userRank = Math.max(1, activePlayers.findIndex((player) => player.isUser) + 1);
+  const gap = activePlayers.length - payouts.length;
+  const shareDelta = payoutEquity - chipShare;
+  let pressureScore = 0.1 + Math.max(0, shareDelta * 2.4);
+
+  if (gap <= 2) {
+    pressureScore += 0.28;
+  }
+
+  if (userRank <= payouts.length + 1) {
+    pressureScore += 0.22;
+  }
+
+  if (userRank === payouts.length || userRank === payouts.length + 1) {
+    pressureScore += 0.15;
+  }
+
+  pressureScore = Math.max(0, Math.min(1, pressureScore));
+
+  let pressureLabel = "Low";
+  if (pressureScore >= 0.75) {
+    pressureLabel = "Very High";
+  } else if (pressureScore >= 0.55) {
+    pressureLabel = "High";
+  } else if (pressureScore >= 0.35) {
+    pressureLabel = "Medium";
+  }
+
+  return {
+    payouts: payouts.map((value, index) => ({
+      place: index + 1,
+      payoutPercent: Number((value * 100).toFixed(1)),
+      finishProbability: Number(((userProbabilities[index] ?? 0) * 100).toFixed(1))
+    })),
+    chipShare: Number((chipShare * 100).toFixed(1)),
+    payoutEquity: Number((payoutEquity * 100).toFixed(1)),
+    activePlayers: activePlayers.length,
+    paidSpots: payouts.length,
+    userRank,
+    pressureScore: Number(pressureScore.toFixed(2)),
+    pressureLabel
+  };
+}
+
+function buildUserRecommendation(state, winPercentage, icm) {
+  if (state.actionSeat !== state.userSeat) {
+    return {
+      action: "wait",
+      label: "Wait",
+      rationale: "The hint is ICM-aware, but no action is needed until your turn.",
+      requiredEquity: null,
+      potOdds: null,
+      riskPremium: null
+    };
+  }
+
+  const context = buildDecisionContext(state, state.userSeat);
+  const rawEquity = winPercentage / 100;
+  const potOdds = context.toCall === 0 ? 0 : context.toCall / Math.max(1, context.pot + context.toCall);
+  const pressurePremium = icm.pressureLabel === "Very High"
+    ? 0.12
+    : icm.pressureLabel === "High"
+      ? 0.08
+      : icm.pressureLabel === "Medium"
+        ? 0.05
+        : 0.02;
+  const requiredEquity = Math.min(0.95, potOdds + pressurePremium);
+  const can = (action) => context.legalActions.includes(action);
+  const strongPreflop = context.hole.tier === "premium" || context.hole.tier === "strong";
+  const strongPostflop = context.postflop.category >= 2 || context.postflop.topPairOrBetter;
+  const strongDraw = context.postflop.flushDraw || context.postflop.straightDraw;
+  const canAttack = can("raise") || can("all-in");
+
+  if (context.toCall === 0) {
+    if (canAttack && (rawEquity >= 0.68 || strongPreflop || strongPostflop)) {
+      return {
+        action: can("raise") ? "raise" : "all-in",
+        label: can("raise") ? "Raise" : "All In",
+        rationale: `${icm.pressureLabel} ICM pressure still allows aggression with a strong edge.`,
+        requiredEquity: Number((pressurePremium * 100).toFixed(1)),
+        potOdds: 0,
+        riskPremium: Number((pressurePremium * 100).toFixed(1))
+      };
+    }
+
+    return {
+      action: "check",
+      label: "Check",
+      rationale: `${icm.pressureLabel} ICM pressure favors preserving stack without a clear value edge.`,
+      requiredEquity: Number((pressurePremium * 100).toFixed(1)),
+      potOdds: 0,
+      riskPremium: Number((pressurePremium * 100).toFixed(1))
+    };
+  }
+
+  if (canAttack && rawEquity >= requiredEquity + 0.12 && (strongPreflop || strongPostflop || strongDraw)) {
+    return {
+      action: can("raise") ? "raise" : "all-in",
+      label: can("raise") ? "Raise" : "All In",
+      rationale: `Your equity clears the pot-odds threshold even after an ICM risk premium.`,
+      requiredEquity: Number((requiredEquity * 100).toFixed(1)),
+      potOdds: Number((potOdds * 100).toFixed(1)),
+      riskPremium: Number((pressurePremium * 100).toFixed(1))
+    };
+  }
+
+  if (can("call") && rawEquity >= requiredEquity) {
+    return {
+      action: "call",
+      label: "Call",
+      rationale: `The hand appears profitable enough to continue after adjusting for ${icm.pressureLabel.toLowerCase()} ICM pressure.`,
+      requiredEquity: Number((requiredEquity * 100).toFixed(1)),
+      potOdds: Number((potOdds * 100).toFixed(1)),
+      riskPremium: Number((pressurePremium * 100).toFixed(1))
+    };
+  }
+
+  return {
+    action: can("fold") ? "fold" : "check",
+    label: can("fold") ? "Fold" : "Check",
+    rationale: `Tournament pressure makes marginal continue decisions worse than they look in pure chip EV.`,
+    requiredEquity: Number((requiredEquity * 100).toFixed(1)),
+    potOdds: Number((potOdds * 100).toFixed(1)),
+    riskPremium: Number((pressurePremium * 100).toFixed(1))
+  };
+}
+
 export function buildUserHint(state) {
   const user = state.players[state.userSeat];
   const opponents = activeOpponentSeats(state);
   const currentEvaluation = currentUserEvaluation(state);
   const { madeThreats, drawThreats } = enumerateOpponentThreats(state);
   const winPercentage = estimateUserEquity(state, opponents.length >= 3 ? 1800 : 2500);
+  const icm = summarizeIcm(state);
+  const recommendation = buildUserRecommendation(state, winPercentage, icm);
 
   return {
     handNumber: state.handNumber,
@@ -1455,6 +2136,8 @@ export function buildUserHint(state) {
     opponentCount: opponents.length,
     currentHandLabel: currentEvaluation.label,
     winPercentage: Number(winPercentage.toFixed(1)),
+    icm,
+    recommendation,
     madeThreats,
     drawThreats,
     lastAction: state.lastAction
@@ -1462,11 +2145,7 @@ export function buildUserHint(state) {
 }
 
 function maskPlayers(state, options = {}) {
-  const revealShowdownHands =
-    state.street === "showdown" && (
-      !state.players[state.userSeat].folded ||
-      options.revealShowdownHandsForFoldedUser === true
-    );
+  const revealShowdownHands = state.street === "showdown";
 
   return state.players.map((player) => ({
     id: player.id,
@@ -1493,15 +2172,35 @@ function maskPlayers(state, options = {}) {
 }
 
 export function serializeGame(state, options = {}) {
+  state = ensureTournamentClock(state);
   const actionPlayer = getPlayer(state, state.actionSeat);
   const legalActions = getLegalActions(state);
   const toCall = getToCall(state, state.actionSeat);
+  const blinds = blindAmountsForState(state);
+  const now = Date.now();
+  const rawActionRemaining = actionPlayer && state.currentTurnStartedAt
+    ? Math.max(0, actionTimeMsForState(state) - (now - state.currentTurnStartedAt))
+    : null;
+  const rawTimeBankRemaining = actionPlayer
+    ? Math.max(
+      0,
+      (actionPlayer.timeBankRemainingMs ?? defaultTimeBankMs(state)) -
+        Math.max(0, (now - (state.currentTurnStartedAt ?? now)) - actionTimeMsForState(state))
+    )
+    : null;
   const minRaiseTo = state.actionSeat === null
     ? null
     : state.currentBet === 0
-      ? BIG_BLIND
+      ? blinds.big
       : state.currentBet + state.minRaise;
   const maxRaiseTo = state.actionSeat === null ? null : actionPlayer.bet + actionPlayer.stack;
+  const activePlayers = activeFieldCount(state);
+  const levelDurationMs = state.tournament?.enabled
+    ? state.tournament.blindLevelDurationSeconds * 1000
+    : null;
+  const levelTimeRemainingMs = state.tournament?.enabled
+    ? Math.max(0, levelDurationMs - (now - state.tournament.blindLevelStartedAt))
+    : null;
 
   return {
     handNumber: state.handNumber,
@@ -1531,16 +2230,38 @@ export function serializeGame(state, options = {}) {
           legalActions,
           toCall,
           minRaiseTo,
-          maxRaiseTo
+          maxRaiseTo,
+          actionStartedAt: state.currentTurnStartedAt,
+          actionTimeRemainingMs: rawActionRemaining,
+          timeBankRemainingMs: rawTimeBankRemaining
         }
       : null,
     canFastForward:
       state.street !== "showdown" &&
       state.players[state.userSeat].folded,
     blinds: {
-      small: SMALL_BLIND,
-      big: BIG_BLIND
+      small: blinds.small,
+      big: blinds.big
     },
+    tournament: {
+      enabled: Boolean(state.tournament?.enabled),
+      fieldSize: state.tournament?.fieldSize ?? MAX_PLAYERS,
+      activePlayers,
+      offTablePlayers: state.tournament?.enabled
+        ? state.tournament.offTableBots.filter((player) => player.stack > 0).length
+        : 0,
+      blindLevelIndex: state.tournament?.blindLevelIndex ?? 0,
+      blindLevelStartedAt: state.tournament?.blindLevelStartedAt ?? null,
+      blindLevelDurationSeconds: state.tournament?.blindLevelDurationSeconds ?? null,
+      levelTimeRemainingMs,
+      actionTimeSeconds: state.tournament?.actionTimeSeconds ?? null,
+      timeBankSeconds: state.tournament?.timeBankSeconds ?? null,
+      finished: Boolean(state.tournament?.finished),
+      champion: state.tournament?.champion ?? null,
+      podium: Array.isArray(state.tournament?.podium) ? state.tournament.podium : []
+    },
+    uiPreferences: sanitizeUiPreferences(state.uiPreferences ?? DEFAULT_UI_PREFERENCES),
+    now,
     lastAction: state.lastAction
   };
 }

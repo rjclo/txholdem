@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const logsDir = path.join(__dirname, "..", "logs");
+const runtimeDataDir = process.env.TXHOLDEM_DATA_DIR
+  ? path.resolve(process.env.TXHOLDEM_DATA_DIR)
+  : path.join(__dirname, "..");
+const logsDir = path.join(runtimeDataDir, "logs");
 
 export const debugLogFile = path.join(logsDir, "game-debug.jsonl");
 

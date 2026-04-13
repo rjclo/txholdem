@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +15,8 @@ import {
   serializeGame,
   snapshotForPersistence,
   startNewHand,
+  updateTournamentConfig,
+  updateUiPreferences,
   updateEnabledStrategies
 } from "./src/game.js";
 import { debugLogFile, logDebugEvent } from "./src/logger.js";
@@ -22,8 +24,12 @@ import { debugLogFile, logDebugEvent } from "./src/logger.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "public");
-const saveFile = path.join(__dirname, "game-state.json");
-const port = process.env.PORT || 3000;
+const runtimeDataDir = process.env.TXHOLDEM_DATA_DIR
+  ? path.resolve(process.env.TXHOLDEM_DATA_DIR)
+  : __dirname;
+const saveFile = path.join(runtimeDataDir, "game-state.json");
+const defaultPort = Number(process.env.PORT || 3000);
+let gameState = null;
 
 function summarizeState(state) {
   if (!state) {
@@ -94,6 +100,10 @@ async function handleStateMutation(request, response, eventType, mutate, details
   }
 }
 
+async function ensureRuntimeDataDir() {
+  await mkdir(runtimeDataDir, { recursive: true });
+}
+
 async function loadGameState() {
   try {
     const contents = await readFile(saveFile, "utf8");
@@ -106,15 +116,6 @@ async function loadGameState() {
 async function persistGameState(state) {
   await writeFile(saveFile, JSON.stringify(snapshotForPersistence(state), null, 2));
 }
-
-let gameState = await loadGameState();
-await persistGameState(gameState);
-await logDebugEvent("server.started", {
-  port,
-  saveFile,
-  debugLogFile,
-  initialState: summarizeState(gameState)
-});
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -168,106 +169,182 @@ async function serveStatic(urlPath, response) {
   }
 }
 
-const server = createServer(async (request, response) => {
-  const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+export function createAppServer() {
+  return createServer(async (request, response) => {
+    const requestUrl = new URL(request.url, `http://${request.headers.host}`);
 
-  if (request.method === "GET" && requestUrl.pathname === "/api/game") {
-    await logDebugEvent("api.game.read", {
-      state: summarizeState(gameState)
-    });
-    return json(response, 200, serializeGame(gameState, getSerializeOptions(request)));
-  }
-
-  if (request.method === "GET" && requestUrl.pathname === "/api/game/hint") {
-    try {
-      const hint = buildUserHint(gameState);
-      await logDebugEvent("api.game.hint", {
-        state: summarizeState(gameState),
-        hint
-      });
-      return json(response, 200, hint);
-    } catch (error) {
-      await logDebugEvent("api.game.hint.error", {
-        error: {
-          message: error.message,
-          stack: error.stack
-        },
+    if (request.method === "GET" && requestUrl.pathname === "/api/game") {
+      await logDebugEvent("api.game.read", {
         state: summarizeState(gameState)
       });
-      return json(response, 400, { error: error.message });
+      return json(response, 200, serializeGame(gameState, getSerializeOptions(request)));
     }
-  }
 
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/new-hand") {
-    return handleStateMutation(request, response, "api.game.new-hand", () => startNewHand(gameState));
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/reset") {
-    return handleStateMutation(request, response, "api.game.reset", () => createInitialGame());
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/action") {
-    const { action, amount } = await readRequestBody(request);
-    return handleStateMutation(
-      request,
-      response,
-      "api.game.action",
-      () => applyAction(gameState, action, amount),
-      { request: { action, amount } }
-    );
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/auto-action") {
-    return handleStateMutation(request, response, "api.game.auto-action", () => applyAutoAction(gameState));
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/auto-bot-action") {
-    return handleStateMutation(request, response, "api.game.auto-bot-action", () => applyAutoBotAction(gameState));
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/fast-forward") {
-    return handleStateMutation(request, response, "api.game.fast-forward", () => fastForwardHand(gameState));
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/rename-user") {
-    const { name } = await readRequestBody(request);
-    return handleStateMutation(
-      request,
-      response,
-      "api.game.rename-user",
-      () => renameUserPlayer(gameState, name),
-      { request: { name } }
-    );
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/game/strategies") {
-    const { enabledStrategyIds } = await readRequestBody(request);
-    return handleStateMutation(
-      request,
-      response,
-      "api.game.strategies",
-      () => updateEnabledStrategies(gameState, enabledStrategyIds),
-      { request: { enabledStrategyIds } }
-    );
-  }
-
-  if (request.method === "POST" && requestUrl.pathname === "/api/log-ui") {
-    try {
-      const event = await readRequestBody(request);
-      await logDebugEvent("ui.event", event);
-      return json(response, 200, { ok: true });
-    } catch (error) {
-      return json(response, 400, { error: error.message });
+    if (request.method === "GET" && requestUrl.pathname === "/api/game/hint") {
+      try {
+        const hint = buildUserHint(gameState);
+        await logDebugEvent("api.game.hint", {
+          state: summarizeState(gameState),
+          hint
+        });
+        return json(response, 200, hint);
+      } catch (error) {
+        await logDebugEvent("api.game.hint.error", {
+          error: {
+            message: error.message,
+            stack: error.stack
+          },
+          state: summarizeState(gameState)
+        });
+        return json(response, 400, { error: error.message });
+      }
     }
-  }
 
-  if (request.method === "GET") {
-    return serveStatic(requestUrl.pathname, response);
-  }
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/new-hand") {
+      return handleStateMutation(request, response, "api.game.new-hand", () => startNewHand(gameState));
+    }
 
-  return json(response, 405, { error: "Method not allowed" });
-});
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/reset") {
+      return handleStateMutation(
+        request,
+        response,
+        "api.game.reset",
+        () => createInitialGame({
+          uiPreferences: gameState?.uiPreferences
+        })
+      );
+    }
 
-server.listen(port, () => {
-  console.log(`Texas Hold'em app running at http://localhost:${port}`);
-});
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/action") {
+      const { action, amount } = await readRequestBody(request);
+      return handleStateMutation(
+        request,
+        response,
+        "api.game.action",
+        () => applyAction(gameState, action, amount),
+        { request: { action, amount } }
+      );
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/auto-action") {
+      return handleStateMutation(request, response, "api.game.auto-action", () => applyAutoAction(gameState));
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/auto-bot-action") {
+      return handleStateMutation(request, response, "api.game.auto-bot-action", () => applyAutoBotAction(gameState));
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/fast-forward") {
+      return handleStateMutation(request, response, "api.game.fast-forward", () => fastForwardHand(gameState));
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/rename-user") {
+      const { name } = await readRequestBody(request);
+      return handleStateMutation(
+        request,
+        response,
+        "api.game.rename-user",
+        () => renameUserPlayer(gameState, name),
+        { request: { name } }
+      );
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/strategies") {
+      const { enabledStrategyIds } = await readRequestBody(request);
+      return handleStateMutation(
+        request,
+        response,
+        "api.game.strategies",
+        () => updateEnabledStrategies(gameState, enabledStrategyIds),
+        { request: { enabledStrategyIds } }
+      );
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/tournament-config") {
+      const { tournament } = await readRequestBody(request);
+      return handleStateMutation(
+        request,
+        response,
+        "api.game.tournament-config",
+        () => updateTournamentConfig(gameState, tournament),
+        { request: { tournament } }
+      );
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/game/ui-preferences") {
+      const { uiPreferences } = await readRequestBody(request);
+      return handleStateMutation(
+        request,
+        response,
+        "api.game.ui-preferences",
+        () => updateUiPreferences(gameState, uiPreferences),
+        { request: { uiPreferences } }
+      );
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/log-ui") {
+      try {
+        const event = await readRequestBody(request);
+        await logDebugEvent("ui.event", event);
+        return json(response, 200, { ok: true });
+      } catch (error) {
+        return json(response, 400, { error: error.message });
+      }
+    }
+
+    if (request.method === "GET") {
+      return serveStatic(requestUrl.pathname, response);
+    }
+
+    return json(response, 405, { error: "Method not allowed" });
+  });
+}
+
+export async function startServer(port = defaultPort) {
+  await ensureRuntimeDataDir();
+  gameState = await loadGameState();
+  await persistGameState(gameState);
+
+  const server = createAppServer();
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+
+  await logDebugEvent("server.started", {
+    port: actualPort,
+    saveFile,
+    debugLogFile,
+    initialState: summarizeState(gameState)
+  });
+
+  return {
+    server,
+    port: actualPort,
+    stop: () => new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    })
+  };
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  startServer().then(({ port }) => {
+    console.log(`Texas Hold'em app running at http://localhost:${port}`);
+  }).catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

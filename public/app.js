@@ -2,6 +2,10 @@ const seatsContainer = document.querySelector("#seats");
 const communityCardsContainer = document.querySelector("#community-cards");
 const boardElement = document.querySelector(".board");
 const tableElement = document.querySelector(".table");
+const tournamentFinishOverlay = document.querySelector("#tournament-finish-overlay");
+const tournamentFinishTitle = document.querySelector("#tournament-finish-title");
+const tournamentFinishMessage = document.querySelector("#tournament-finish-message");
+const tournamentFinishPodium = document.querySelector("#tournament-finish-podium");
 const streetLabel = document.querySelector("#street-label");
 const potLabel = document.querySelector("#pot-label");
 const potBreakdown = document.querySelector("#pot-breakdown");
@@ -17,18 +21,33 @@ const hintToggle = document.querySelector("#hint-toggle");
 const hintRefreshButton = document.querySelector("#hint-refresh");
 const hintStatus = document.querySelector("#hint-status");
 const hintEquity = document.querySelector("#hint-equity");
+const hintIcm = document.querySelector("#hint-icm");
 const hintHandLabel = document.querySelector("#hint-hand-label");
 const hintOpponents = document.querySelector("#hint-opponents");
+const hintRecommendation = document.querySelector("#hint-recommendation");
+const hintIcmOutlook = document.querySelector("#hint-icm-outlook");
 const hintMadeThreats = document.querySelector("#hint-made-threats");
 const hintDrawThreats = document.querySelector("#hint-draw-threats");
 const playerNameForm = document.querySelector("#player-name-form");
 const playerNameInput = document.querySelector("#player-name-input");
 const playerNameSave = document.querySelector("#player-name-save");
+const settingsTabButtons = [...document.querySelectorAll(".settings-tab")];
+const settingsPanes = [...document.querySelectorAll(".settings-pane")];
 const strategyForm = document.querySelector("#strategy-form");
+const tournamentForm = document.querySelector("#tournament-form");
+const tournamentEnabledInput = document.querySelector("#tournament-enabled");
+const tournamentFieldSizeInput = document.querySelector("#tournament-field-size");
+const blindLevelSecondsInput = document.querySelector("#blind-level-seconds");
+const actionTimeSecondsInput = document.querySelector("#action-time-seconds");
+const timeBankSecondsInput = document.querySelector("#time-bank-seconds");
+const tournamentSave = document.querySelector("#tournament-save");
 const strategyMenu = document.querySelector("#strategy-menu");
 const strategySave = document.querySelector("#strategy-save");
 const showBotStrategiesCheckbox = document.querySelector("#show-bot-strategies");
 const turnSummary = document.querySelector("#turn-summary");
+const tournamentSummary = document.querySelector("#tournament-summary");
+const blindClock = document.querySelector("#blind-clock");
+const actionClock = document.querySelector("#action-clock");
 const newHandButton = document.querySelector("#new-hand-button");
 const resetGameButton = document.querySelector("#reset-game-button");
 const autoActionButton = document.querySelector("#auto-action-button");
@@ -56,6 +75,7 @@ const ROLE_LABELS = {
 const UI_PREFERENCE_KEYS = {
   slowModeBots: "txholdem.slowModeBots",
   showBotStrategies: "txholdem.showBotStrategies",
+  settingsTab: "txholdem.settingsTab",
   settingsCollapsed: "txholdem.settingsCollapsed",
   standingsCollapsed: "txholdem.standingsCollapsed",
   hintCollapsed: "txholdem.hintCollapsed",
@@ -67,7 +87,8 @@ const UI_PREFERENCE_KEYS = {
 const FLOATING_PANEL_LIMITS = {
   minWidth: 220,
   minHeight: 120,
-  collapsedSize: 58,
+  collapsedWidth: 36,
+  collapsedHeight: 36,
   margin: 8
 };
 
@@ -87,6 +108,8 @@ let hintData = null;
 let hintRequestInFlight = false;
 let hintError = null;
 let lastHintContextRequested = null;
+let tournamentTimer = null;
+let activeSettingsTab = "name";
 let panelLayouts = {
   settings: null,
   standings: null,
@@ -134,6 +157,23 @@ function loadStoredBooleanPreference(key, fallback = false) {
 function saveBooleanPreference(key, value) {
   try {
     window.localStorage.setItem(key, String(value));
+  } catch {
+    // Ignore storage failures and keep the in-memory preference.
+  }
+}
+
+function loadStoredStringPreference(key, fallback = "") {
+  try {
+    const value = window.localStorage.getItem(key);
+    return value === null ? fallback : value;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveStringPreference(key, value) {
+  try {
+    window.localStorage.setItem(key, value);
   } catch {
     // Ignore storage failures and keep the in-memory preference.
   }
@@ -332,14 +372,10 @@ function renderPlayers(players) {
     }
 
     if (showBotStrategies && player.isBot && player.strategyProfile.length > 0) {
-      const visibleStrategies = displayFocusedSeat === player.seat
-        ? player.strategyProfile
-        : player.strategyProfile.slice(0, 3);
-
-      visibleStrategies.forEach((strategy) => {
+      player.strategyProfile.forEach((strategy) => {
         const chip = document.createElement("span");
         chip.className = "strategy-chip";
-        chip.textContent = `${strategy.name} ${strategy.percent}%`;
+        chip.textContent = strategy.percent === null ? strategy.name : `${strategy.name} ${strategy.percent}%`;
         strategyContainer.appendChild(chip);
       });
     }
@@ -444,6 +480,60 @@ function renderStandings(players) {
     });
 }
 
+function ordinalLabel(place) {
+  if (place === 1) {
+    return "1st";
+  }
+  if (place === 2) {
+    return "2nd";
+  }
+  if (place === 3) {
+    return "3rd";
+  }
+  return `${place}th`;
+}
+
+function renderTournamentFinish(game) {
+  const tournament = game?.tournament;
+
+  if (!tournament?.enabled || !tournament.finished) {
+    tournamentFinishOverlay.hidden = true;
+    tournamentFinishPodium.replaceChildren();
+    return;
+  }
+
+  const champion = tournament.champion;
+  const userWon = Boolean(champion?.isUser);
+  tournamentFinishTitle.textContent = userWon
+    ? "Congratulations, You Won"
+    : `${champion?.name ?? "Tournament Winner"} Wins`;
+  tournamentFinishMessage.textContent = userWon
+    ? "You finished first and closed out the tournament."
+    : `${champion?.name ?? "The winner"} finished first. Final podium is below.`;
+
+  tournamentFinishPodium.replaceChildren();
+  (tournament.podium ?? []).forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "tournament-podium-row";
+    if (entry.isUser) {
+      row.classList.add("is-user");
+    }
+
+    const place = document.createElement("span");
+    place.className = "tournament-podium-place";
+    place.textContent = ordinalLabel(entry.place);
+
+    const name = document.createElement("strong");
+    name.className = "tournament-podium-name";
+    name.textContent = entry.isUser ? `${entry.name} (You)` : entry.name;
+
+    row.append(place, name);
+    tournamentFinishPodium.appendChild(row);
+  });
+
+  tournamentFinishOverlay.hidden = false;
+}
+
 function buildHintContextKey(game = currentGame) {
   if (!game) {
     return null;
@@ -495,6 +585,87 @@ function renderHintEntries(container, entries, emptyMessage) {
   });
 }
 
+function renderHintFacts(container, entries, emptyMessage) {
+  container.replaceChildren();
+
+  if (!entries || entries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "hint-empty";
+    empty.textContent = emptyMessage;
+    container.appendChild(empty);
+    return;
+  }
+
+  entries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "hint-fact";
+
+    const label = document.createElement("span");
+    label.className = "hint-fact-label";
+    label.textContent = entry.label;
+
+    const value = document.createElement("strong");
+    value.className = "hint-fact-value";
+    value.textContent = entry.value;
+
+    row.append(label, value);
+
+    if (entry.detail) {
+      const detail = document.createElement("p");
+      detail.className = "hint-fact-detail";
+      detail.textContent = entry.detail;
+      row.append(detail);
+    }
+
+    container.appendChild(row);
+  });
+}
+
+function renderRecommendationCard(recommendation) {
+  hintRecommendation.replaceChildren();
+
+  if (!recommendation) {
+    const empty = document.createElement("p");
+    empty.className = "hint-empty";
+    empty.textContent = "No recommendation available.";
+    hintRecommendation.appendChild(empty);
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "hint-advice-card";
+
+  const action = document.createElement("strong");
+  action.className = "hint-advice-action";
+  action.textContent = recommendation.label;
+
+  const rationale = document.createElement("p");
+  rationale.className = "hint-advice-text";
+  rationale.textContent = recommendation.rationale;
+
+  card.append(action, rationale);
+
+  const stats = [];
+  if (recommendation.potOdds !== null) {
+    stats.push(`Pot odds ${recommendation.potOdds}%`);
+  }
+  if (recommendation.riskPremium !== null) {
+    stats.push(`ICM premium ${recommendation.riskPremium}%`);
+  }
+  if (recommendation.requiredEquity !== null) {
+    stats.push(`Need ${recommendation.requiredEquity}%`);
+  }
+
+  if (stats.length > 0) {
+    const meta = document.createElement("p");
+    meta.className = "hint-advice-meta";
+    meta.textContent = stats.join(" | ");
+    card.append(meta);
+  }
+
+  hintRecommendation.appendChild(card);
+}
+
 function renderHintPanel() {
   const contextKey = buildHintContextKey();
   const isStale = Boolean(hintData && hintData.contextKey !== contextKey);
@@ -514,8 +685,32 @@ function renderHintPanel() {
   }
 
   hintEquity.textContent = hintData ? `${hintData.winPercentage}%` : "-";
+  hintIcm.textContent = hintData?.icm ? `${hintData.icm.payoutEquity}%` : "-";
   hintHandLabel.textContent = hintData ? hintData.currentHandLabel : "-";
   hintOpponents.textContent = hintData ? `${hintData.opponentCount}` : "-";
+  renderRecommendationCard(hintData?.recommendation);
+  renderHintFacts(
+    hintIcmOutlook,
+    hintData?.icm
+      ? [
+          {
+            label: "Pressure",
+            value: hintData.icm.pressureLabel,
+            detail: `Rank ${hintData.icm.userRank}/${hintData.icm.activePlayers}, paid spots ${hintData.icm.paidSpots}`
+          },
+          {
+            label: "Chip Share",
+            value: `${hintData.icm.chipShare}%`
+          },
+          ...hintData.icm.payouts.map((entry) => ({
+            label: `${entry.place}${entry.place === 1 ? "st" : entry.place === 2 ? "nd" : entry.place === 3 ? "rd" : "th"} Place`,
+            value: `${entry.finishProbability}%`,
+            detail: `${entry.payoutPercent}% payout`
+          }))
+        ]
+      : [],
+    "ICM outlook appears once a tournament payout model is available."
+  );
 
   renderHintEntries(
     hintMadeThreats,
@@ -554,6 +749,111 @@ function syncPlayerNameInput(game) {
   const user = game.players[game.userSeat];
   if (document.activeElement !== playerNameInput) {
     playerNameInput.value = user.name;
+  }
+}
+
+function syncTournamentInputs(game) {
+  const tournament = game?.tournament ?? { enabled: false, fieldSize: 8 };
+
+  if (document.activeElement !== tournamentFieldSizeInput) {
+    tournamentFieldSizeInput.value = String(tournament.fieldSize ?? 8);
+  }
+  if (document.activeElement !== blindLevelSecondsInput) {
+    blindLevelSecondsInput.value = String(tournament.blindLevelDurationSeconds ?? 300);
+  }
+  if (document.activeElement !== actionTimeSecondsInput) {
+    actionTimeSecondsInput.value = String(tournament.actionTimeSeconds ?? 20);
+  }
+  if (document.activeElement !== timeBankSecondsInput) {
+    timeBankSecondsInput.value = String(tournament.timeBankSeconds ?? 60);
+  }
+  tournamentEnabledInput.checked = Boolean(tournament.enabled);
+  tournamentSave.textContent = tournament.enabled ? "Restart Tournament" : "Start Tournament";
+}
+
+function syncUiPreferences(game) {
+  const nextShowBotStrategies = Boolean(game?.uiPreferences?.showBotStrategies);
+  showBotStrategies = nextShowBotStrategies;
+  showBotStrategiesCheckbox.checked = nextShowBotStrategies;
+  saveBooleanPreference(UI_PREFERENCE_KEYS.showBotStrategies, nextShowBotStrategies);
+}
+
+function setActiveSettingsTab(tabId) {
+  activeSettingsTab = tabId;
+  saveStringPreference(UI_PREFERENCE_KEYS.settingsTab, tabId);
+
+  settingsTabButtons.forEach((button) => {
+    const isActive = button.id === `settings-tab-${tabId}`;
+    button.classList.toggle("is-active", isActive);
+    button.setAttribute("aria-selected", String(isActive));
+  });
+
+  settingsPanes.forEach((pane) => {
+    const isActive = pane.id === `settings-pane-${tabId}`;
+    pane.classList.toggle("is-active", isActive);
+    pane.hidden = !isActive;
+  });
+}
+
+function formatDuration(ms) {
+  if (ms === null || ms === undefined) {
+    return "-";
+  }
+
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function updateTournamentClocks(game = currentGame) {
+  if (!game) {
+    blindClock.textContent = "-";
+    actionClock.textContent = "-";
+    tournamentSummary.textContent = "";
+    return;
+  }
+
+  const now = Date.now();
+  const tournament = game.tournament ?? { enabled: false };
+
+  if (!tournament.enabled) {
+    tournamentSummary.textContent = "Cash table mode.";
+    blindClock.textContent = "Static";
+    actionClock.textContent = game.currentTurn?.isBot ? "Bot turn" : "No clock";
+    return;
+  }
+
+  if (tournament.finished) {
+    tournamentSummary.textContent = `Tournament complete. ${tournament.champion?.name ?? "Winner"} finished 1st.`;
+    blindClock.textContent = `L${(tournament.blindLevelIndex ?? 0) + 1} | Complete`;
+    actionClock.textContent = "Stopped";
+    return;
+  }
+
+  tournamentSummary.textContent = `Tournament field ${tournament.activePlayers}/${tournament.fieldSize}. Off-table ${tournament.offTablePlayers}. Blinds ${game.blinds.small}/${game.blinds.big}.`;
+  blindClock.textContent = `L${(tournament.blindLevelIndex ?? 0) + 1} | ${formatDuration((tournament.levelTimeRemainingMs ?? 0) - (now - (game.now ?? now)))}`;
+
+  if (!game.currentTurn) {
+    actionClock.textContent = "Waiting";
+    return;
+  }
+
+  if (game.currentTurn.isBot) {
+    actionClock.textContent = "Bot turn";
+    return;
+  }
+
+  const delta = now - (game.now ?? now);
+  const actionRemaining = Math.max(0, (game.currentTurn.actionTimeRemainingMs ?? 0) - delta);
+  const bankRemaining = Math.max(
+    0,
+    (game.currentTurn.timeBankRemainingMs ?? 0) - Math.max(0, delta - (game.currentTurn.actionTimeRemainingMs ?? 0))
+  );
+  actionClock.textContent = `${formatDuration(actionRemaining)} | ${formatDuration(bankRemaining)}`;
+
+  if (actionRemaining === 0 && bankRemaining === 0 && !requestInFlight) {
+    submitAction(game.currentTurn.legalActions.includes("check") ? "check" : "fold");
   }
 }
 
@@ -646,8 +946,8 @@ function applyPanelLayout(panel, layout, collapsed) {
     return;
   }
 
-  const width = collapsed ? FLOATING_PANEL_LIMITS.collapsedSize : layout.width;
-  const height = collapsed ? FLOATING_PANEL_LIMITS.collapsedSize : layout.height;
+  const width = collapsed ? FLOATING_PANEL_LIMITS.collapsedWidth : layout.width;
+  const height = collapsed ? FLOATING_PANEL_LIMITS.collapsedHeight : layout.height;
   const normalized = normalizePanelLayout(
     { ...layout, width, height },
     width,
@@ -697,21 +997,35 @@ function initializePanelLayouts() {
   panelLayouts.standings = loadStoredObjectPreference(UI_PREFERENCE_KEYS.standingsPanelLayout);
   panelLayouts.hint = loadStoredObjectPreference(UI_PREFERENCE_KEYS.hintPanelLayout);
 
+  const collapsedLeft = Math.max(
+    FLOATING_PANEL_LIMITS.margin,
+    window.innerWidth - FLOATING_PANEL_LIMITS.collapsedWidth - 18
+  );
+
   if (!panelLayouts.settings) {
-    panelLayouts.settings = captureDefaultPanelLayout(settingsPanel);
+    panelLayouts.settings = {
+      width: 320,
+      height: 620,
+      left: collapsedLeft,
+      top: 18
+    };
   }
 
   if (!panelLayouts.standings) {
-    panelLayouts.standings = captureDefaultPanelLayout(standingsPanel);
+    panelLayouts.standings = {
+      width: 300,
+      height: 420,
+      left: collapsedLeft,
+      top: 62
+    };
   }
 
   if (!panelLayouts.hint) {
-    const width = 360;
     panelLayouts.hint = {
-      width,
+      width: 360,
       height: 430,
-      left: Math.max(FLOATING_PANEL_LIMITS.margin, window.innerWidth - width - 18),
-      top: 174
+      left: collapsedLeft,
+      top: 106
     };
   }
 
@@ -820,10 +1134,12 @@ function updateActionPanel(game) {
         : "Hand complete. Start the next hand when ready."
       : "No active turn.";
     setActionButtonState(foldButton, canFastForward, canFastForward ? "Jump To End" : "Fold");
-    setActionButtonState(checkButton, false);
-    setActionButtonState(callButton, false);
-    setActionButtonState(allInButton, false);
+    setActionButtonState(checkButton, false, "Check");
+    setActionButtonState(callButton, false, "Call");
+    setActionButtonState(allInButton, false, "All In");
     setActionButtonState(raiseButton, false, "Raise To");
+    raiseAmountInput.disabled = true;
+    raiseAmountInput.value = "";
     autoActionButton.disabled = requestInFlight;
     nextBotActionButton.disabled = true;
     return;
@@ -870,6 +1186,7 @@ function scheduleBotAutoPlay() {
 
 function renderGame(game) {
   currentGame = game;
+  syncUiPreferences(game);
   renderHintPanel();
   boardElement.classList.toggle("is-focused", boardFocused);
   streetLabel.textContent = game.street.toUpperCase();
@@ -877,12 +1194,15 @@ function renderGame(game) {
   lastActionLabel.textContent = game.lastAction;
   userSeatBanner.textContent = `You are ${game.players[game.userSeat].name} at seat ${game.userSeat + 1}`;
   syncPlayerNameInput(game);
+  syncTournamentInputs(game);
   renderStrategyMenu(game.strategyMenu);
   renderStandings(game.players);
   renderPlayers(game.players);
+  renderTournamentFinish(game);
   renderSidePots(game.sidePots, game.players);
   renderCommunityCards(game.communityCards, game.winningCommunityCardIndices ?? []);
   updateActionPanel(game);
+  updateTournamentClocks(game);
   scheduleBotAutoPlay();
   renderHintPanel();
   maybeRefreshHint(game);
@@ -958,6 +1278,9 @@ async function saveStrategiesFromMenu() {
   } finally {
     strategySaveInFlight = false;
     strategySave.disabled = false;
+    if (currentGame?.strategyMenu) {
+      renderStrategyMenu(currentGame.strategyMenu);
+    }
   }
 }
 
@@ -1210,6 +1533,16 @@ showBotStrategiesCheckbox.addEventListener("change", () => {
   if (currentGame) {
     renderPlayers(currentGame.players);
   }
+  requestGame("/api/game/ui-preferences", {
+    method: "POST",
+    body: JSON.stringify({
+      uiPreferences: {
+        showBotStrategies
+      }
+    })
+  }).catch((error) => {
+    lastActionLabel.textContent = error.message;
+  });
 });
 
 playerNameForm.addEventListener("submit", async (event) => {
@@ -1237,6 +1570,30 @@ strategyForm.addEventListener("submit", async (event) => {
   await saveStrategiesFromMenu();
 });
 
+tournamentForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const tournament = {
+    enabled: tournamentEnabledInput.checked,
+    fieldSize: Number(tournamentFieldSizeInput.value),
+    blindLevelDurationSeconds: Number(blindLevelSecondsInput.value),
+    actionTimeSeconds: Number(actionTimeSecondsInput.value),
+    timeBankSeconds: Number(timeBankSecondsInput.value)
+  };
+  logUiEvent("ui.submit.tournament-form", { tournament });
+
+  try {
+    tournamentSave.disabled = true;
+    await requestGame("/api/game/tournament-config", {
+      method: "POST",
+      body: JSON.stringify({ tournament })
+    });
+  } catch (error) {
+    lastActionLabel.textContent = error.message;
+  } finally {
+    tournamentSave.disabled = false;
+  }
+});
+
 strategyMenu.addEventListener("change", () => {
   strategyFormDirty = true;
   logUiEvent("ui.change.strategy-menu", {
@@ -1246,13 +1603,27 @@ strategyMenu.addEventListener("change", () => {
   saveStrategiesFromMenu();
 });
 
+settingsTabButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const tabId = button.id.replace("settings-tab-", "");
+    logUiEvent("ui.click.settings-tab", { tabId });
+    setActiveSettingsTab(tabId);
+  });
+});
+
 showBotStrategies = loadStoredBooleanPreference(UI_PREFERENCE_KEYS.showBotStrategies, false);
 slowModeBots = loadStoredBooleanPreference(UI_PREFERENCE_KEYS.slowModeBots, false);
-settingsCollapsed = loadStoredBooleanPreference(UI_PREFERENCE_KEYS.settingsCollapsed, false);
-standingsCollapsed = loadStoredBooleanPreference(UI_PREFERENCE_KEYS.standingsCollapsed, false);
+activeSettingsTab = loadStoredStringPreference(UI_PREFERENCE_KEYS.settingsTab, "name");
+settingsCollapsed = loadStoredBooleanPreference(UI_PREFERENCE_KEYS.settingsCollapsed, true);
+standingsCollapsed = loadStoredBooleanPreference(UI_PREFERENCE_KEYS.standingsCollapsed, true);
 hintCollapsed = loadStoredBooleanPreference(UI_PREFERENCE_KEYS.hintCollapsed, true);
+tournamentFieldSizeInput.value = "8";
+blindLevelSecondsInput.value = "300";
+actionTimeSecondsInput.value = "20";
+timeBankSecondsInput.value = "60";
 showBotStrategiesCheckbox.checked = showBotStrategies;
 slowModeBotsCheckbox.checked = slowModeBots;
+setActiveSettingsTab(activeSettingsTab);
 
 initializePanelLayouts();
 wireFloatingPanel("settings", settingsPanel);
@@ -1261,5 +1632,8 @@ wireFloatingPanel("hint", hintPanel);
 window.addEventListener("resize", renderPanelLayouts);
 renderPanelStates();
 renderHintPanel();
+tournamentTimer = window.setInterval(() => {
+  updateTournamentClocks();
+}, 250);
 logUiEvent("ui.app.loaded");
 loadGame();

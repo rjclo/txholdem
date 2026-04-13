@@ -2,6 +2,17 @@ const BASIC = "basic";
 const MEDIUM = "medium";
 const ADVANCED = "advanced";
 
+function shuffle(items) {
+  const copy = [...items];
+
+  for (let index = copy.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [copy[index], copy[swapIndex]] = [copy[swapIndex], copy[index]];
+  }
+
+  return copy;
+}
+
 function can(context, action) {
   return context.legalActions.includes(action);
 }
@@ -447,6 +458,13 @@ const CATEGORIES = [
   { id: MEDIUM, name: "Medium Level" },
   { id: ADVANCED, name: "Advanced Level" }
 ];
+const ACTION_STRENGTH = {
+  fold: 0,
+  check: 1,
+  call: 2,
+  raise: 3,
+  "all-in": 4
+};
 
 export const DEFAULT_ENABLED_STRATEGY_IDS = STRATEGY_CATALOG
   .filter((strategy) => strategy.category === BASIC)
@@ -464,21 +482,102 @@ function randomWeights(strategyIds) {
   return Object.fromEntries(strategyIds.map((id, index) => [id, Number((rawWeights[index] / total).toFixed(4))]));
 }
 
+function normalizeProfileToPercents(weights, strategyIds) {
+  const rawPercents = strategyIds.map((id) => ({
+    id,
+    exact: (weights[id] ?? 0) * 100
+  }));
+  const base = Object.fromEntries(rawPercents.map((entry) => [entry.id, Math.floor(entry.exact)]));
+  let assigned = Object.values(base).reduce((sum, value) => sum + value, 0);
+
+  rawPercents
+    .sort((left, right) => (right.exact - Math.floor(right.exact)) - (left.exact - Math.floor(left.exact)))
+    .forEach((entry) => {
+      if (assigned >= 100) {
+        return;
+      }
+
+      base[entry.id] += 1;
+      assigned += 1;
+    });
+
+  if (assigned === 0 && strategyIds.length > 0) {
+    base[strategyIds[0]] = 100;
+  }
+
+  return base;
+}
+
+function strategyCategory(strategyId) {
+  return STRATEGY_MAP.get(strategyId)?.category ?? BASIC;
+}
+
+function randomModifierSet(strategyIds) {
+  if (strategyIds.length === 0) {
+    return [];
+  }
+
+  const picked = strategyIds.filter(() => Math.random() < 0.5);
+  return picked.length > 0 ? picked : [strategyIds[Math.floor(Math.random() * strategyIds.length)]];
+}
+
+function createHandPlan(profile, strategyIds) {
+  const plan = [];
+
+  for (const id of strategyIds) {
+    const count = profile[id] ?? 0;
+    for (let index = 0; index < count; index += 1) {
+      plan.push(id);
+    }
+  }
+
+  return plan.length > 0 ? shuffle(plan) : [strategyIds[0]];
+}
+
+function strategyForHand(plan, handNumber) {
+  if (!Array.isArray(plan) || plan.length === 0) {
+    return null;
+  }
+
+  const index = Math.max(0, (handNumber - 1) % plan.length);
+  return plan[index];
+}
+
 export function createStrategyState(players, userSeat, enabledStrategyIds = DEFAULT_ENABLED_STRATEGY_IDS) {
   const enabledIds = sanitizeEnabledStrategyIds(enabledStrategyIds);
+  const basicIds = enabledIds.filter((id) => strategyCategory(id) === BASIC);
+  const mediumIds = enabledIds.filter((id) => strategyCategory(id) === MEDIUM);
+  const advancedIds = enabledIds.filter((id) => strategyCategory(id) === ADVANCED);
   const botProfiles = {};
+  const botHandPlans = {};
+  const botModifierProfiles = {};
+  const currentStrategyBySeat = {};
 
   for (const player of players) {
     if (player.seat === userSeat) {
       continue;
     }
 
-    botProfiles[player.seat] = randomWeights(enabledIds);
+    const profile = normalizeProfileToPercents(randomWeights(basicIds.length > 0 ? basicIds : enabledIds), basicIds.length > 0 ? basicIds : enabledIds);
+    botProfiles[player.seat] = profile;
+    botHandPlans[player.seat] = createHandPlan(profile, Object.keys(profile));
+    botModifierProfiles[player.seat] = {
+      medium: randomModifierSet(mediumIds),
+      advanced: randomModifierSet(advancedIds)
+    };
+    currentStrategyBySeat[player.seat] = {
+      basic: strategyForHand(botHandPlans[player.seat], 1),
+      medium: [...botModifierProfiles[player.seat].medium],
+      advanced: [...botModifierProfiles[player.seat].advanced]
+    };
   }
 
   return {
     enabledStrategyIds: enabledIds,
-    botProfiles
+    botProfiles,
+    botHandPlans,
+    botModifierProfiles,
+    currentStrategyBySeat
   };
 }
 
@@ -487,32 +586,87 @@ export function updateStrategyState(players, userSeat, enabledStrategyIds) {
 }
 
 function equalWeights(strategyIds) {
-  const weight = Number((1 / strategyIds.length).toFixed(4));
-  return Object.fromEntries(strategyIds.map((id) => [id, weight]));
-}
+  const percent = Math.floor(100 / strategyIds.length);
+  const profile = Object.fromEntries(strategyIds.map((id) => [id, percent]));
+  let assigned = percent * strategyIds.length;
 
-function pickWeightedStrategy(weights, enabledStrategyIds) {
-  const ids = enabledStrategyIds.filter((id) => (weights[id] ?? 0) > 0);
-  const activeIds = ids.length > 0 ? ids : enabledStrategyIds;
-  const sourceWeights = ids.length > 0 ? weights : equalWeights(enabledStrategyIds);
-  let cursor = Math.random();
-
-  for (const id of activeIds) {
-    cursor -= sourceWeights[id] ?? 0;
-    if (cursor <= 0) {
-      return id;
-    }
+  for (let index = 0; assigned < 100; index += 1) {
+    profile[strategyIds[index % strategyIds.length]] += 1;
+    assigned += 1;
   }
 
-  return activeIds[activeIds.length - 1];
+  return profile;
+}
+
+export function assignStrategiesForHand(strategyState, handNumber) {
+  const enabledStrategyIds = sanitizeEnabledStrategyIds(strategyState?.enabledStrategyIds);
+  const botProfiles = strategyState?.botProfiles ?? {};
+  const existingPlans = strategyState?.botHandPlans ?? {};
+  const modifierProfiles = strategyState?.botModifierProfiles ?? {};
+  const botHandPlans = {};
+  const botModifierProfiles = {};
+  const currentStrategyBySeat = {};
+
+  for (const [seat, rawProfile] of Object.entries(botProfiles)) {
+    const basicStrategyIds = Object.keys(rawProfile).filter((id) => strategyCategory(id) === BASIC);
+    const profile = normalizeProfileToPercents(
+      rawProfile,
+      basicStrategyIds.length > 0 ? basicStrategyIds : enabledStrategyIds.filter((id) => strategyCategory(id) === BASIC)
+    );
+    const existingPlan = existingPlans[seat];
+    const plan = Array.isArray(existingPlan) && existingPlan.length === 100
+      ? existingPlan
+      : createHandPlan(profile, enabledStrategyIds);
+    botHandPlans[seat] = plan;
+    botModifierProfiles[seat] = {
+      medium: modifierProfiles[seat]?.medium ?? [],
+      advanced: modifierProfiles[seat]?.advanced ?? []
+    };
+    currentStrategyBySeat[seat] = {
+      basic: strategyForHand(plan, handNumber) ?? enabledStrategyIds[0],
+      medium: [...botModifierProfiles[seat].medium],
+      advanced: [...botModifierProfiles[seat].advanced]
+    };
+  }
+
+  return {
+    enabledStrategyIds,
+    botProfiles: Object.fromEntries(
+      Object.entries(botProfiles).map(([seat, rawProfile]) => [seat, normalizeProfileToPercents(rawProfile, enabledStrategyIds)])
+    ),
+    botHandPlans,
+    botModifierProfiles,
+    currentStrategyBySeat
+  };
 }
 
 export function chooseBotAction(context, strategyState, seat) {
   const enabledStrategyIds = sanitizeEnabledStrategyIds(strategyState?.enabledStrategyIds);
-  const weights = strategyState?.botProfiles?.[seat] ?? equalWeights(enabledStrategyIds);
-  const selectedStrategyId = pickWeightedStrategy(weights, enabledStrategyIds);
-  const strategy = STRATEGY_MAP.get(selectedStrategyId);
-  const decision = strategy?.decide(context) ?? fallbackDecision(context);
+  const selectedProfile = strategyState?.currentStrategyBySeat?.[seat];
+  const basicId = selectedProfile?.basic ?? enabledStrategyIds[0];
+  const overlayIds = [
+    ...(selectedProfile?.medium ?? []),
+    ...(selectedProfile?.advanced ?? [])
+  ];
+  let decision = STRATEGY_MAP.get(basicId)?.decide(context) ?? fallbackDecision(context);
+
+  for (const strategyId of overlayIds) {
+    const proposal = STRATEGY_MAP.get(strategyId)?.decide(context);
+
+    if (!proposal?.action || !can(context, proposal.action)) {
+      continue;
+    }
+
+    const currentStrength = ACTION_STRENGTH[decision.action] ?? 0;
+    const proposalStrength = ACTION_STRENGTH[proposal.action] ?? 0;
+
+    if (
+      proposalStrength > currentStrength ||
+      (proposalStrength === currentStrength && proposal.amount !== null && decision.amount === null)
+    ) {
+      decision = proposal;
+    }
+  }
 
   if (decision.action === "raise" && can(context, "raise")) {
     return {
@@ -548,20 +702,20 @@ export function serializeStrategyMenu(enabledStrategyIds) {
 }
 
 export function serializeBotStrategyProfile(strategyState, seat) {
-  const enabledStrategyIds = sanitizeEnabledStrategyIds(strategyState?.enabledStrategyIds);
-  const weights = strategyState?.botProfiles?.[seat] ?? equalWeights(enabledStrategyIds);
+  const currentProfile = strategyState?.currentStrategyBySeat?.[seat];
+  const strategyIds = [
+    currentProfile?.basic,
+    ...(currentProfile?.medium ?? []),
+    ...(currentProfile?.advanced ?? [])
+  ].filter(Boolean);
 
-  return enabledStrategyIds
-    .map((id) => ({
-      id,
-      name: STRATEGY_MAP.get(id)?.name ?? id,
-      weight: weights[id] ?? 0
-    }))
-    .filter((entry) => entry.weight > 0)
-    .sort((left, right) => right.weight - left.weight)
-    .map((entry) => ({
-      id: entry.id,
-      name: entry.name,
-      percent: Math.round(entry.weight * 100)
-    }));
+  if (strategyIds.length === 0) {
+    return [];
+  }
+
+  return strategyIds.map((strategyId) => ({
+    id: strategyId,
+    name: STRATEGY_MAP.get(strategyId)?.name ?? strategyId,
+    percent: null
+  }));
 }

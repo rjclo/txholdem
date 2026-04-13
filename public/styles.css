@@ -37,10 +37,13 @@ body {
 
 .floating-panel {
   position: fixed;
+  display: flex;
+  flex-direction: column;
   right: 18px;
   z-index: 20;
   width: 270px;
   min-width: 220px;
+  max-height: calc(100vh - 36px);
   padding: 12px;
   border-radius: 18px;
   background: rgba(8, 17, 26, 0.9);
@@ -64,14 +67,25 @@ body {
 }
 
 .floating-panel.is-collapsed {
-  width: 58px;
-  height: 58px;
-  padding: 8px;
+  width: 36px;
+  height: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
   border-radius: 999px;
+  background: transparent;
+  backdrop-filter: none;
+  box-shadow: none;
 }
 
 .panel-shell {
+  flex: 1;
+  min-height: 0;
   margin-top: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
   user-select: text;
 }
 
@@ -85,6 +99,11 @@ body {
   justify-content: space-between;
   gap: 10px;
   cursor: move;
+}
+
+.floating-panel.is-collapsed .panel-header {
+  height: 100%;
+  justify-content: center;
 }
 
 .panel-header-actions {
@@ -107,12 +126,47 @@ body {
   font-size: 0.78rem;
 }
 
+.settings-tabs {
+  display: flex;
+  gap: 6px;
+  align-items: end;
+  margin-bottom: 12px;
+  padding-top: 2px;
+}
+
+.settings-tab {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: 0;
+  border-radius: 14px 14px 0 0;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  padding: 10px 14px 9px;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.settings-tab.is-active {
+  background: linear-gradient(180deg, rgba(28, 47, 66, 0.98), rgba(13, 25, 37, 0.98));
+  color: var(--text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.settings-pane {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 12px;
+}
+
 .player-name-form {
   margin-bottom: 14px;
 }
 
 .strategy-form {
   margin-bottom: 14px;
+}
+
+.strategy-form input[type="number"] {
+  width: 100%;
+  margin-bottom: 10px;
 }
 
 .strategy-visibility-toggle {
@@ -190,6 +244,25 @@ body {
   letter-spacing: 0.04em;
 }
 
+.floating-panel.is-collapsed .panel-toggle {
+  width: 100%;
+  height: 100%;
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(240, 210, 141, 0.92), rgba(201, 142, 48, 0.9));
+  color: #251200;
+  font-size: 0.95rem;
+  letter-spacing: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  white-space: nowrap;
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.28);
+}
+
 .panel-resize-handle {
   position: absolute;
   right: 8px;
@@ -208,7 +281,9 @@ body {
 }
 
 .floating-panel.is-collapsed .panel-title,
-.floating-panel.is-collapsed .panel-resize-handle {
+.floating-panel.is-collapsed .panel-resize-handle,
+.floating-panel.is-collapsed .panel-action-button,
+.floating-panel.is-collapsed .panel-header-actions > :not(.panel-toggle) {
   display: none;
 }
 
@@ -296,6 +371,33 @@ button:disabled {
   color: var(--text);
 }
 
+.tournament-summary {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.tournament-clocks {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+.clock-pill {
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.clock-label {
+  display: block;
+  color: var(--gold);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
 .autoplay-toggle {
   display: flex;
   gap: 10px;
@@ -331,6 +433,67 @@ button:disabled {
   background: rgba(0, 0, 0, 0.24);
 }
 
+.tournament-finish-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 11, 18, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.tournament-finish-card {
+  width: min(520px, calc(100vw - 64px));
+  padding: 28px;
+  border-radius: 28px;
+  border: 1px solid rgba(227, 194, 107, 0.36);
+  background:
+    radial-gradient(circle at top, rgba(227, 194, 107, 0.18), rgba(16, 31, 44, 0.96) 55%),
+    rgba(12, 20, 31, 0.96);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.34);
+}
+
+.tournament-finish-title {
+  margin: 8px 0 10px;
+  font-size: clamp(1.8rem, 4vw, 2.8rem);
+}
+
+.tournament-finish-message {
+  margin: 0 0 18px;
+  color: var(--muted);
+}
+
+.tournament-finish-podium {
+  display: grid;
+  gap: 10px;
+}
+
+.tournament-podium-row {
+  display: grid;
+  grid-template-columns: 56px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tournament-podium-row.is-user {
+  border: 1px solid rgba(131, 235, 163, 0.38);
+}
+
+.tournament-podium-place {
+  color: var(--gold);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.tournament-podium-name {
+  color: var(--text);
+}
+
 .standings-list {
   display: grid;
   gap: 8px;
@@ -344,7 +507,7 @@ button:disabled {
 
 .hint-metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 14px;
 }
@@ -376,6 +539,44 @@ button:disabled {
 .hint-list {
   display: grid;
   gap: 8px;
+}
+
+.hint-advice {
+  display: grid;
+}
+
+.hint-advice-card,
+.hint-fact {
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.hint-advice-action,
+.hint-fact-value {
+  display: block;
+  color: var(--text);
+}
+
+.hint-advice-text,
+.hint-advice-meta,
+.hint-fact-label,
+.hint-fact-detail {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.hint-advice-meta {
+  color: var(--gold);
+}
+
+.hint-fact-label {
+  margin-top: 0;
+}
+
+.hint-fact-detail {
+  margin-bottom: 0;
 }
 
 .hint-row {

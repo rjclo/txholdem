@@ -7,15 +7,15 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <aside id="settings-panel" class="floating-panel settings-panel is-expanded" aria-label="Table settings">
+    <aside id="settings-panel" class="floating-panel settings-panel is-collapsed" aria-label="Table settings">
       <div class="panel-header panel-drag-handle">
         <p class="panel-title">Settings</p>
         <button
           id="settings-toggle"
           class="panel-toggle"
           type="button"
-          data-collapsed-label="Cfg"
-          aria-expanded="true"
+          data-collapsed-label="⚙"
+          aria-expanded="false"
           aria-controls="settings-shell"
           title="Toggle settings"
         >
@@ -23,35 +23,62 @@
         </button>
       </div>
       <div id="settings-shell" class="panel-shell">
-        <form id="player-name-form" class="player-name-form">
-          <label class="panel-label" for="player-name-input">Your Name</label>
-          <div class="player-name-controls">
-            <input id="player-name-input" type="text" maxlength="24" placeholder="Player name" />
-            <button id="player-name-save" type="submit">Save</button>
-          </div>
-        </form>
-        <form id="strategy-form" class="strategy-form">
-          <p class="panel-label">Bot Strategies</p>
-          <label class="strategy-visibility-toggle" for="show-bot-strategies">
-            <input id="show-bot-strategies" type="checkbox" />
-            Show bot strategies on seats
-          </label>
-          <div id="strategy-menu" class="strategy-menu"></div>
-          <button id="strategy-save" type="submit">Save Strategies</button>
-        </form>
+        <div class="settings-tabs" role="tablist" aria-label="Settings sections">
+          <button id="settings-tab-name" class="settings-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="settings-pane-name">Name</button>
+          <button id="settings-tab-strategy" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-strategy">Strategy</button>
+          <button id="settings-tab-tournament" class="settings-tab" type="button" role="tab" aria-selected="false" aria-controls="settings-pane-tournament">Tournament</button>
+        </div>
+        <section id="settings-pane-name" class="settings-pane is-active" role="tabpanel" aria-labelledby="settings-tab-name">
+          <form id="player-name-form" class="player-name-form">
+            <label class="panel-label" for="player-name-input">Your Name</label>
+            <div class="player-name-controls">
+              <input id="player-name-input" type="text" maxlength="24" placeholder="Player name" />
+              <button id="player-name-save" type="submit">Save</button>
+            </div>
+          </form>
+        </section>
+        <section id="settings-pane-strategy" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-strategy" hidden>
+          <form id="strategy-form" class="strategy-form">
+            <p class="panel-label">Bot Strategies</p>
+            <label class="strategy-visibility-toggle" for="show-bot-strategies">
+              <input id="show-bot-strategies" type="checkbox" />
+              Show bot strategies on seats
+            </label>
+            <div id="strategy-menu" class="strategy-menu"></div>
+            <button id="strategy-save" type="submit">Save Strategies</button>
+          </form>
+        </section>
+        <section id="settings-pane-tournament" class="settings-pane" role="tabpanel" aria-labelledby="settings-tab-tournament" hidden>
+          <form id="tournament-form" class="strategy-form">
+            <p class="panel-label">Tournament</p>
+            <label class="strategy-visibility-toggle" for="tournament-enabled">
+              <input id="tournament-enabled" type="checkbox" />
+              Enable tournament mode
+            </label>
+            <label class="panel-label" for="tournament-field-size">Players In Tournament</label>
+            <input id="tournament-field-size" type="number" min="8" max="100" step="1" />
+            <label class="panel-label" for="blind-level-seconds">Blind Level Seconds</label>
+            <input id="blind-level-seconds" type="number" min="30" max="1800" step="30" />
+            <label class="panel-label" for="action-time-seconds">Action Clock Seconds</label>
+            <input id="action-time-seconds" type="number" min="5" max="120" step="1" />
+            <label class="panel-label" for="time-bank-seconds">Time Bank Seconds</label>
+            <input id="time-bank-seconds" type="number" min="0" max="600" step="5" />
+            <button id="tournament-save" type="submit">Start Tournament</button>
+          </form>
+        </section>
       </div>
       <div class="panel-resize-handle" aria-hidden="true" title="Drag to resize"></div>
     </aside>
 
-    <aside id="standings-panel" class="floating-panel standings-panel is-expanded" aria-label="Player standings">
+    <aside id="standings-panel" class="floating-panel standings-panel is-collapsed" aria-label="Player standings">
       <div class="panel-header panel-drag-handle">
         <p class="panel-title">Standings</p>
         <button
           id="standings-toggle"
           class="panel-toggle"
           type="button"
-          data-collapsed-label="Stk"
-          aria-expanded="true"
+          data-collapsed-label="◫"
+          aria-expanded="false"
           aria-controls="standings-shell"
           title="Toggle standings"
         >
@@ -93,6 +120,10 @@
             <strong id="hint-equity" class="hint-metric-value">-</strong>
           </div>
           <div class="hint-metric">
+            <span class="hint-metric-label">ICM EV</span>
+            <strong id="hint-icm" class="hint-metric-value">-</strong>
+          </div>
+          <div class="hint-metric">
             <span class="hint-metric-label">Your Hand</span>
             <strong id="hint-hand-label" class="hint-metric-value">-</strong>
           </div>
@@ -101,6 +132,14 @@
             <strong id="hint-opponents" class="hint-metric-value">-</strong>
           </div>
         </div>
+        <section class="hint-section">
+          <p class="panel-label">Recommendation</p>
+          <div id="hint-recommendation" class="hint-advice"></div>
+        </section>
+        <section class="hint-section">
+          <p class="panel-label">ICM Outlook</p>
+          <div id="hint-icm-outlook" class="hint-list"></div>
+        </section>
         <section class="hint-section">
           <p class="panel-label">Made Threats</p>
           <div id="hint-made-threats" class="hint-list"></div>
@@ -131,6 +170,17 @@
           <div class="action-summary">
             <p class="panel-label">Current Turn</p>
             <p id="turn-summary" class="turn-summary"></p>
+            <p id="tournament-summary" class="tournament-summary"></p>
+            <div class="tournament-clocks">
+              <div class="clock-pill">
+                <span class="clock-label">Blind Level</span>
+                <strong id="blind-clock">-</strong>
+              </div>
+              <div class="clock-pill">
+                <span class="clock-label">Action / Bank</span>
+                <strong id="action-clock">-</strong>
+              </div>
+            </div>
           </div>
           <div class="bot-controls">
             <label class="autoplay-toggle" for="auto-play-bots">
@@ -157,6 +207,17 @@
 
         <section class="table" aria-label="Poker table">
           <div class="table-felt"></div>
+          <section id="tournament-finish-overlay" class="tournament-finish-overlay" hidden aria-live="polite">
+            <div class="tournament-finish-card">
+              <p class="eyebrow">Tournament Complete</p>
+              <h2 id="tournament-finish-title" class="tournament-finish-title">Tournament Complete</h2>
+              <p id="tournament-finish-message" class="tournament-finish-message"></p>
+              <div>
+                <p class="panel-label">Top 3</p>
+                <div id="tournament-finish-podium" class="tournament-finish-podium"></div>
+              </div>
+            </div>
+          </section>
 
           <div class="board">
             <div class="board-meta">

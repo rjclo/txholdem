@@ -444,6 +444,10 @@ button:disabled {
   backdrop-filter: blur(8px);
 }
 
+.tournament-finish-overlay[hidden] {
+  display: none;
+}
+
 .tournament-finish-card {
   width: min(520px, calc(100vw - 64px));
   padding: 28px;
